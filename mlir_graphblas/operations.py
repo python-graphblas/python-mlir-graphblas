@@ -502,27 +502,48 @@ def extract(out: SparseTensor,
         tensor = TransposedMatrix.wrap(tensor)
 
     # Check indices
-    if tensor.ndims < 1:
+    if tensor.ndims == 0:  # Scalar input
         raise TypeError("Use `extract_element` rather than `extract` for Scalars")
-    if tensor.ndims < 2 and col_indices is not None:
-        raise ValueError("col_indices not allowed for Vector, use row_indices")
+    elif tensor.ndims == 1:  # Vector input
+        if col_indices is not None:
+            raise ValueError("col_indices not allowed for Vector, use row_indices")
+        if type(row_indices) is int:
+            raise TypeError("Use extract_element to get a single element from the Vector")
+    else:  # Matrix input
+        if type(row_indices) is int and type(col_indices) is int:
+            raise TypeError("Use extract_element to get a single element from the Matrix")
+
+    # Compute output sizes
+    if type(row_indices) is int:
+        row_size = None
+    elif row_indices is None:
+        row_size = tensor.shape[0]
+    else:
+        row_size = len(row_indices)
+
+    if type(col_indices) is int or tensor.ndims < 2:
+        col_size = None
+    elif col_indices is None:
+        col_size = tensor.shape[1]
+    else:
+        col_size = len(col_indices)
 
     # Compare shapes
-    if type(row_indices) is int and type(col_indices) is int:
-        raise TypeError("Cannot provide int for both row_indices and col_indices")
-    if type(row_indices) is int:
-        expected_out_shape = (tensor.shape[1],)
-    elif type(col_indices) is int:
-        expected_out_shape = (tensor.shape[0],)
-    else:
-        expected_out_shape = tensor.shape
+    if tensor.ndims == 1:  # Vector input
+        expected_out_shape = (row_size,)
+    else:  # Matrix input
+        if type(row_indices) is int:
+            expected_out_shape = (col_size,)
+        elif type(col_indices) is int:
+            expected_out_shape = (row_size,)
+        else:
+            expected_out_shape = (row_size, col_size)
     if out.shape != expected_out_shape:
         raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {expected_out_shape}")
 
+    result = impl.extract(tensor, row_indices, col_indices, row_size, col_size)
     if mask is not None:
-        tensor = impl.apply_mask(tensor, mask, desc)
-
-    result = impl.extract(tensor, row_indices, col_indices)
+        result = impl.apply_mask(result, mask, desc)
     update(out, result, mask, accum, desc)
 
 

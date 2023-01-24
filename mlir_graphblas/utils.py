@@ -1,4 +1,5 @@
 import ctypes
+import numpy as np
 from enum import Enum
 from mlir import ir
 from .exceptions import (
@@ -36,6 +37,48 @@ def ensure_scalar_of_type(obj, dtype):
     s = Scalar.new(dtype)
     s.set_element(obj)
     return s
+
+
+def renumber_indices(indices, selected):
+    """
+    Given a set of non-unique `indices`, returns an array of the same size
+    as `indices` with values renumbered according to the positions in `selected`.
+
+    All values in indices must also be found in selected.
+
+    If these were Python lists instead of numpy arrays, this would be
+    equivalent to calling `[selected.index(x) for x in indices]`.
+    However, this will be much faster as it uses numpy to perform
+    the lookups.
+
+    :param indices: ndarray of non-unique positive integers
+    :param selected: ndarray of unique positive integers
+    :return: ndarray of same length as indices
+
+    Example
+    -------
+    >>> a = np.array([1, 1, 1, 3, 5])
+    >>> b = np.array([1, 2, 5, 3])
+    >>> renumber_indices(a, b)
+    array([0, 0, 0, 3, 2])
+    """
+    # Check that values in selected are unique
+    unique = np.unique(selected)
+    if unique.size < selected.size:
+        unique, counts = np.unique(selected, return_counts=True)
+        raise ValueError(f"Found duplicate values in `selected`: {unique[counts > 1]}")
+
+    # Check for required inclusion criteria
+    not_found = np.setdiff1d(indices, selected)
+    if not_found.size > 0:
+        raise KeyError(f"Found values in `indices` not contained in `selected`: {not_found}")
+
+    # To be efficient, the searching must be done on a sorted array
+    # Build the sort_order to map back to the original order
+    sort_order = np.argsort(selected)
+    renumbered_indices = np.arange(len(selected), dtype=indices.dtype)[sort_order]
+    pos = np.searchsorted(selected[sort_order], indices)
+    return renumbered_indices[pos]
 
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithcmpi-mlirarithcmpiop
