@@ -26,7 +26,7 @@ from .compiler import compile, engine_cache
 from . descriptor import Descriptor, NULL as NULL_DESC
 from .utils import get_sparse_output_pointer, get_scalar_output_pointer, renumber_indices
 from .types import RankedTensorType, BOOL, INT64, FP64
-from .exceptions import GrbIndexOutOfBounds
+from .exceptions import GrbIndexOutOfBounds, GrbDimensionMismatch
 
 
 # TODO: vec->matrix broadcasting as builtin param in apply_mask (rowwise/colwise)
@@ -93,7 +93,7 @@ def _build_apply_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool
             @func.FuncOp.from_py_func(rtt_mask, rtt_sp)
             def main(msk, x):
                 c = [arith.ConstantOp(index, i) for i in range(rank)]
-                dims = [tensor.DimOp(x, c[i]).result for i in mask.permutation]
+                dims = [tensor.DimOp(msk, c[i]).result for i in mask.permutation]
                 out = bufferization.AllocTensorOp(rtt_out, dims, None, None, False)
                 generic_op = linalg.GenericOp(
                     [rtt_out],

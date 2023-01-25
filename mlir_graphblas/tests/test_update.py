@@ -1,7 +1,4 @@
 import pytest
-import numpy as np
-from numpy.testing import assert_equal as np_assert_equal
-from numpy.testing import assert_allclose as np_assert_allclose
 from ..tensor import Scalar, Vector, Matrix
 from ..types import BOOL, INT16
 from .. import operations
@@ -9,6 +6,7 @@ import pytest
 from ..operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiring
 from .. import descriptor
 from ..tensor import TransposedMatrix
+from .utils import matrix_compare
 
 
 @pytest.fixture
@@ -47,107 +45,159 @@ def test_no_transpose_out_mask(mats):
 
 
 def test_mask_accum_replace(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, accum=BinaryOp.plus, desc=descriptor.RS)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 1, 1, 1])
-    np_assert_equal(cols, [0, 1, 3, 4])
-    np_assert_allclose(vals, [109, -4, 40, 395])
-
-
-# TODO: add tests with transposed inputs and all combinations of mask, accum, replace
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.RS),
+                    (x, yT, descriptor.RST1),
+                    (xT, y, descriptor.RST0),
+                    (xT, yT, descriptor.RST0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, accum=BinaryOp.plus, desc=d)
+        matrix_compare(z,
+                       [0, 1, 1, 1],
+                       [0, 1, 3, 4],
+                       [109, -4, 40, 395])
 
 
 def test_mask_complement_accum_replace(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, accum=BinaryOp.plus, desc=descriptor.RSC)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 1])
-    np_assert_equal(cols, [1, 3, 0])
-    np_assert_allclose(vals, [220, 28, 297])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.RSC),
+                    (x, yT, descriptor.RSCT1),
+                    (xT, y, descriptor.RSCT0),
+                    (xT, yT, descriptor.RSCT0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, accum=BinaryOp.plus, desc=d)
+        matrix_compare(z,
+                       [0, 0, 1],
+                       [1, 3, 0],
+                       [220, 28, 297])
 
 
 def test_mask_accum(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, accum=BinaryOp.plus, desc=descriptor.S)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 1, 1, 1, 1])
-    np_assert_equal(cols, [0, 1, 0, 1, 3, 4])
-    np_assert_allclose(vals, [109, 200, 300, -4, 40, 395])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.S),
+                    (x, yT, descriptor.ST1),
+                    (xT, y, descriptor.ST0),
+                    (xT, yT, descriptor.ST0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, accum=BinaryOp.plus, desc=d)
+        matrix_compare(z,
+                       [0, 0, 1, 1, 1, 1],
+                       [0, 1, 0, 1, 3, 4],
+                       [109, 200, 300, -4, 40, 395])
 
 
 def test_mask_complement_accum(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, accum=BinaryOp.plus, desc=descriptor.SC)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 0, 1, 1])
-    np_assert_equal(cols, [0, 1, 3, 0, 4])
-    np_assert_allclose(vals, [100, 220, 28, 297, 400])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.SC),
+                    (x, yT, descriptor.SCT1),
+                    (xT, y, descriptor.SCT0),
+                    (xT, yT, descriptor.SCT0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, accum=BinaryOp.plus, desc=d)
+        matrix_compare(z,
+                       [0, 0, 0, 1, 1],
+                       [0, 1, 3, 0, 4],
+                       [100, 220, 28, 297, 400])
 
 
 def test_accum(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, accum=BinaryOp.plus)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 0, 1, 1, 1, 1])
-    np_assert_equal(cols, [0, 1, 3, 0, 1, 3, 4])
-    np_assert_allclose(vals, [109, 220, 28, 297, -4, 40, 395])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.NULL),
+                    (x, yT, descriptor.T1),
+                    (xT, y, descriptor.T0),
+                    (xT, yT, descriptor.T0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, accum=BinaryOp.plus, desc=d)
+        matrix_compare(z,
+                       [0, 0, 0, 1, 1, 1, 1],
+                       [0, 1, 3, 0, 1, 3, 4],
+                       [109, 220, 28, 297, -4, 40, 395])
 
 
 def test_mask_replace(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, desc=descriptor.RS)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 1, 1, 1])
-    np_assert_equal(cols, [0, 1, 3, 4])
-    np_assert_allclose(vals, [9, -4, 40, -5])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.RS),
+                    (x, yT, descriptor.RST1),
+                    (xT, y, descriptor.RST0),
+                    (xT, yT, descriptor.RST0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, desc=d)
+        matrix_compare(z,
+                       [0, 1, 1, 1],
+                       [0, 1, 3, 4],
+                       [9, -4, 40, -5])
 
 
 def test_mask_complement_replace(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, desc=descriptor.RSC)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 1])
-    np_assert_equal(cols, [1, 3, 0])
-    np_assert_allclose(vals, [20, 28, -3])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.RSC),
+                    (x, yT, descriptor.RSCT1),
+                    (xT, y, descriptor.RSCT0),
+                    (xT, yT, descriptor.RSCT0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, desc=d)
+        matrix_compare(z,
+                       [0, 0, 1],
+                       [1, 3, 0],
+                       [20, 28, -3])
 
 
 def test_mask(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, desc=descriptor.S)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 1, 1, 1, 1])
-    np_assert_equal(cols, [0, 1, 0, 1, 3, 4])
-    np_assert_allclose(vals, [9, 200, 300, -4, 40, -5])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.S),
+                    (x, yT, descriptor.ST1),
+                    (xT, y, descriptor.ST0),
+                    (xT, yT, descriptor.ST0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, desc=d)
+        matrix_compare(z,
+                       [0, 0, 1, 1, 1, 1],
+                       [0, 1, 0, 1, 3, 4],
+                       [9, 200, 300, -4, 40, -5])
 
 
 def test_mask_complement(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, desc=descriptor.SC)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 0, 1, 1])
-    np_assert_equal(cols, [0, 1, 3, 0, 4])
-    np_assert_allclose(vals, [100, 20, 28, -3, 400])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.SC),
+                    (x, yT, descriptor.SCT1),
+                    (xT, y, descriptor.SCT0),
+                    (xT, yT, descriptor.SCT0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, desc=d)
+        matrix_compare(z,
+                       [0, 0, 0, 1, 1],
+                       [0, 1, 3, 0, 4],
+                       [100, 20, 28, -3, 400])
 
 
 def test_plain_update(mats):
-    x, _, y, _, mask, out = mats
-    operations.ewise_add(out, BinaryOp.plus, x, y)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 0, 1, 1, 1, 1])
-    np_assert_equal(cols, [0, 1, 3, 0, 1, 3, 4])
-    np_assert_allclose(vals, [9, 20, 28, -3, -4, 40, -5])
+    x, xT, y, yT, mask, out = mats
+    for a, b, d in [(x, y, descriptor.NULL),
+                    (x, yT, descriptor.T1),
+                    (xT, y, descriptor.T0),
+                    (xT, yT, descriptor.T0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, desc=d)
+        matrix_compare(z,
+                       [0, 0, 0, 1, 1, 1, 1],
+                       [0, 1, 3, 0, 1, 3, 4],
+                       [9, 20, 28, -3, -4, 40, -5])
 
 
 def test_value_mask(mats):
-    x, _, y, _, mask, out = mats
+    x, xT, y, yT, _, out = mats
     mask = Matrix.new(BOOL, 2, 5)
     mask.build([0, 0, 0, 0, 0, 1, 1, 1, 1], [0, 1, 2, 3, 4, 1, 2, 3, 4], [1, 0, 0, 0, 0, 1, 1, 1, 1])
-    operations.ewise_add(out, BinaryOp.plus, x, y, mask=mask, desc=descriptor.NULL)
-    rows, cols, vals = out.extract_tuples()
-    np_assert_equal(rows, [0, 0, 1, 1, 1, 1])
-    np_assert_equal(cols, [0, 1, 0, 1, 3, 4])
-    np_assert_allclose(vals, [9, 200, 300, -4, 40, -5])
+    for a, b, d in [(x, y, descriptor.NULL),
+                    (x, yT, descriptor.T1),
+                    (xT, y, descriptor.T0),
+                    (xT, yT, descriptor.T0T1)]:
+        z = out.dup()
+        operations.ewise_add(z, BinaryOp.plus, a, b, mask=mask, desc=d)
+        matrix_compare(z,
+                       [0, 0, 1, 1, 1, 1],
+                       [0, 1, 0, 1, 3, 4],
+                       [9, 200, 300, -4, 40, -5])
 
 
 # TODO: verify all output arguments with assign
