@@ -26,6 +26,7 @@ from .compiler import compile, engine_cache
 from . descriptor import Descriptor, NULL as NULL_DESC
 from .utils import get_sparse_output_pointer, get_scalar_output_pointer, renumber_indices
 from .types import RankedTensorType, BOOL, INT64, FP64
+from .exceptions import GrbIndexOutOfBounds
 
 
 # TODO: vec->matrix broadcasting as builtin param in apply_mask (rowwise/colwise)
@@ -902,7 +903,7 @@ def _build_reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
         return compile(module)
 
 
-def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=None, col_size=None):
+def extract(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size):
     # There may be a way to do this in MLIR, but for now we use numpy
     if tensor.ndims == 1:
         # Vector
@@ -910,10 +911,10 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=No
         assert col_size is None
 
         if row_indices is None:  # None indicates GrB_ALL
-            return tensor.dup()
+            return dup(tensor)
 
         rowidx, vals = tensor.extract_tuples()
-        row_indices = np.array(row_indices)
+        row_indices = np.array(row_indices, dtype=np.uint64)
         selected = np.isin(rowidx, row_indices)
         # Filter and renumber rowidx
         rowidx, vals = rowidx[selected], vals[selected]
@@ -924,18 +925,18 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=No
 
     # Matrix
     if row_indices is None and col_indices is None:
-        return tensor.dup()
+        return dup(tensor)
 
     rowidx, colidx, vals = tensor.extract_tuples()
     if row_indices is not None:
-        rindices_arr = np.array(row_indices)
+        rindices_arr = np.array(row_indices, dtype=np.uint64)
         rowsel = np.isin(rowidx, rindices_arr)
         # Filter and renumber rowidx
         rowidx, colidx, vals = rowidx[rowsel], colidx[rowsel], vals[rowsel]
         if type(row_indices) is not int:
             rowidx = renumber_indices(rowidx, rindices_arr)
     if col_indices is not None:
-        cindices_arr = np.array(col_indices)
+        cindices_arr = np.array(col_indices, dtype=np.uint64)
         colsel = np.isin(colidx, cindices_arr)
         # Filter and renumber colidx
         rowidx, colidx, vals = rowidx[colsel], colidx[colsel], vals[colsel]
@@ -958,5 +959,46 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=No
     return m
 
 
-def assign():
-    raise NotImplementedError()
+def assign(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size=None):
+    # There may be a way to do this in MLIR, but for now we use numpy
+    if tensor.ndims == 1:
+        # Vector input
+        if row_indices is None and col_size is None:
+            # Vector output with GrB_ALL
+            return dup(tensor)
+
+        idx, vals = tensor.extract_tuples()
+
+        if col_size is None:
+            # Vector output
+            v = Vector.new(tensor.dtype, row_size)
+            # Map idx to output indices
+            idx = np.array(row_indices, dtype=np.uint64)[idx]
+            v.build(idx, vals)
+            return v
+        # Assign Vector as row or column of Matrix
+        m = Matrix.new(tensor.dtype, row_size, col_size)
+        if type(row_indices) is int:
+            # Map idx to output cols
+            colidx = idx if col_indices is None else np.array(col_indices, dtype=np.uint64)[idx]
+            m.build([row_indices]*len(vals), colidx, vals)
+        if type(col_indices) is int:
+            # Map idx to output rows
+            rowidx = idx if row_indices is None else np.array(row_indices, dtype=np.uint64)[idx]
+            m.build(rowidx, [col_indices]*len(vals), vals)
+        return m
+
+    # Matrix input
+    if row_indices is None and col_indices is None:
+        return dup(tensor)
+
+    rowidx, colidx, vals = tensor.extract_tuples()
+
+    # Map indices to output
+    if row_indices is not None:
+        rowidx = np.array(row_indices, dtype=np.uint64)[rowidx]
+    if col_indices is not None:
+        colidx = np.array(col_indices, dtype=np.uint64)[colidx]
+    m = Matrix.new(tensor.dtype, row_size, col_size)
+    m.build(rowidx, colidx, vals)
+    return m

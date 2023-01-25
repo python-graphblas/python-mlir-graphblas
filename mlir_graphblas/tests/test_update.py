@@ -148,3 +148,6 @@ def test_value_mask(mats):
     np_assert_equal(rows, [0, 0, 1, 1, 1, 1])
     np_assert_equal(cols, [0, 1, 0, 1, 3, 4])
     np_assert_allclose(vals, [9, 200, 300, -4, 40, -5])
+
+
+# TODO: verify all output arguments with assign

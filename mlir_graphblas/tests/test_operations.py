@@ -22,9 +22,9 @@ def vs():
 @pytest.fixture
 def ms():
     x = Matrix.new(INT16, 2, 5)
-    x.build([0, 0, 1, 1, 1], [1, 3, 0, 1, 4], [-1., -2., -3., -4., -5.])
+    x.build([0, 0, 1, 1, 1], [1, 3, 0, 1, 4], [-1, -2, -3, -4, -5])
     y = Matrix.new(INT16, 2, 5)
-    y.build([0, 0, 0, 1], [0, 1, 3, 3], [10., 20., 30., 40.])
+    y.build([0, 0, 0, 1], [0, 1, 3, 3], [10, 20, 30, 40])
     return x, y
 
 
@@ -75,7 +75,7 @@ def test_ewise_add_mat(ms):
     rowidx, colidx, vals = z.extract_tuples()
     np_assert_equal(rowidx, [0, 0, 0, 1, 1, 1, 1])
     np_assert_equal(colidx, [0, 1, 3, 0, 1, 3, 4])
-    np_assert_allclose(vals, [10., -20., -60., -3., -4., 40., -5.])
+    np_assert_allclose(vals, [10, -20, -60, -3, -4, 40, -5])
 
 
 def test_ewise_mult_vec(vs):
@@ -94,7 +94,7 @@ def test_ewise_mult_mat(ms):
     rowidx, colidx, vals = z.extract_tuples()
     np_assert_equal(rowidx, [0, 0])
     np_assert_equal(colidx, [1, 3])
-    np_assert_allclose(vals, [-1., -2.])
+    np_assert_allclose(vals, [-1, -2])
 
 
 def test_mxm(mm):
@@ -379,3 +379,104 @@ def test_extract_vec_from_mat(mm):
     idx, vals = z3.extract_tuples()
     np_assert_equal(idx, [2])
     np_assert_allclose(vals, [6.6])
+
+
+def test_assign_vec(vs):
+    x, y = vs
+
+    # Assign all
+    operations.assign(y, x, accum=BinaryOp.plus)
+    idx, vals = y.extract_tuples()
+    np_assert_equal(idx, [0, 1, 2, 3])
+    np_assert_allclose(vals, [1., 10., 22., 33.])
+
+    # Expand
+    z = Vector.new(x.dtype, 16)
+    operations.assign(z, x, [1, 3, 13, 10, 2])
+    idx, vals = z.extract_tuples()
+    assert z.size() == 16
+    np_assert_equal(idx, [3, 10, 13])
+    np_assert_allclose(vals, [10., 30., 20.])
+
+
+def test_assign_mat(ms):
+    x, y = ms
+
+    # Assign identical rows, identical cols
+    z = y.dup()
+    operations.assign(z, x, accum=BinaryOp.plus)
+    rowidx, colidx, vals = z.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 0, 1, 1, 1, 1])
+    np_assert_equal(colidx, [0, 1, 3, 0, 1, 3, 4])
+    np_assert_allclose(vals, [10, 19, 28, -3, -4, 40, -5])
+
+    # Assign new rows, new cols
+    z2 = Matrix.new(x.dtype, 4, 8)
+    operations.assign(z2, x, [3, 0], [0, 3, 4, 1, 7])
+    rowidx, colidx, vals = z2.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 0, 3, 3])
+    np_assert_equal(colidx, [0, 3, 7, 1, 3])
+    np_assert_allclose(vals, [-3, -4, -5, -2, -1])
+
+    # Assign identical rows, new cols
+    z3 = Matrix.new(x.dtype, x.shape[0], 8)
+    operations.assign(z3, x, None, [0, 3, 4, 1, 7])
+    rowidx, colidx, vals = z3.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 1, 1, 1])
+    np_assert_equal(colidx, [1, 3, 0, 3, 7])
+    np_assert_allclose(vals, [-2, -1, -3, -4, -5])
+
+    # Assign new rows, identical cols
+    z4 = Matrix.new(x.dtype, 4, x.shape[1])
+    operations.assign(z4, x, [3, 0], None)
+    rowidx, colidx, vals = z4.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 0, 3, 3])
+    np_assert_equal(colidx, [0, 1, 4, 1, 3])
+    np_assert_allclose(vals, [-3, -4, -5, -1, -2])
+
+
+def test_assign_vec_to_mat(ms):
+    x, _ = ms
+
+    # Assign row with identical indices
+    z1 = x.dup()
+    r0 = Vector.new(x.dtype, x.shape[1])
+    r0.build([0, 2, 3, 4], [5, 4, 3, 2])
+    operations.assign(z1, r0, 0, None, accum=BinaryOp.plus)
+    rowidx, colidx, vals = z1.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 0, 0, 0, 1, 1, 1])
+    np_assert_equal(colidx, [0, 1, 2, 3, 4, 0, 1, 4])
+    np_assert_allclose(vals, [5, -1, 4, 1, 2, -3, -4, -5])
+
+    # Assign row with new indices
+    z2 = x.dup()
+    r1 = Vector.new(x.dtype, 3)
+    r1.build([0, 2], [100, 150])
+    operations.assign(z2, r1, 0, [4, 0, 2], accum=BinaryOp.plus)
+    rowidx, colidx, vals = z2.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 0, 0, 1, 1, 1])
+    np_assert_equal(colidx, [1, 2, 3, 4, 0, 1, 4])
+    np_assert_allclose(vals, [-1, 150, -2, 100, -3, -4, -5])
+
+    # Assign col with identical indices
+    z3 = x.dup()
+    c0 = Vector.new(x.dtype, x.shape[0])
+    c0.build([0, 1], [97, 99])
+    operations.assign(z3, c0, None, 3, accum=BinaryOp.plus)
+    rowidx, colidx, vals = z3.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 1, 1, 1, 1])
+    np_assert_equal(colidx, [1, 3, 0, 1, 3, 4])
+    np_assert_allclose(vals, [-1, 95, -3, -4, 99, -5])
+
+    # Assign col with new indices
+    z4 = x.dup()
+    c1 = Vector.new(x.dtype, 1)
+    c1.build([0], [101])
+    operations.assign(z4, c1, [1], 3, accum=BinaryOp.plus)
+    rowidx, colidx, vals = z4.extract_tuples()
+    np_assert_equal(rowidx, [0, 0, 1, 1, 1, 1])
+    np_assert_equal(colidx, [1, 3, 0, 1, 3, 4])
+    np_assert_allclose(vals, [-1, -2, -3, -4, 101, -5])
+
+
+# TODO: test assign with scalar input

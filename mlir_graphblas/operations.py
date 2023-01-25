@@ -555,4 +555,71 @@ def assign(out: SparseTensor,
            mask: Optional[Vector] = None,
            accum: Optional[BinaryOp] = None,
            desc: Descriptor = NULL_DESC):
-    raise NotImplementedError()
+    """
+    Setting row_indices or col_indices to `None` is the equivalent of GrB_ALL
+    """
+    # Handle pure-Python scalar
+    if not isinstance(tensor, SparseObject):
+        if not isinstance(tensor, (int, float, bool)):
+            raise TypeError(f"tensor must be a SparseObject or Python scalar, not {type(tensor)}")
+        tmp = Scalar.new(out.dtype)
+        tmp.set_element(tensor)
+        tensor = tmp
+
+    # Verify dtypes
+    if out.dtype != tensor.dtype:
+        raise GrbDomainMismatch(f"output must have same dtype as input: {out.dtype} != {tensor.dtype}")
+
+    # Apply transpose
+    if desc.transpose0 and tensor.ndims == 2:
+        tensor = TransposedMatrix.wrap(tensor)
+
+    # Check indices
+    if out.ndims == 0:  # Scalar output
+        raise TypeError("Use `set_element` rather than `assign` for Scalars")
+    if out.ndims == 1:  # Vector output
+        if col_indices is not None:
+            raise ValueError("col_indices not allowed for Vector, use row_indices")
+        if type(row_indices) is int:
+            raise TypeError("Use `set_element` rather than `assign` to set a single element in the Vector")
+    else:  # Matrix output
+        if type(row_indices) is int and type(col_indices) is int:
+            raise TypeError("Use `set_element` rather than `assign` to set a single element in the Matrix")
+
+    # Special handling for Scalar input
+    if tensor.ndims == 0:
+        # TODO: implement this
+        raise NotImplementedError("assigning with Scalar input not yet implemented")
+
+    # Compute output sizes
+    if type(row_indices) is int:
+        row_size = None
+    elif row_indices is None:
+        row_size = tensor.shape[0]
+    else:
+        row_size = len(row_indices)
+
+    if type(col_indices) is int or out.ndims < 2:
+        col_size = None
+    elif col_indices is None:
+        col_size = out.shape[1]
+    else:
+        col_size = len(col_indices)
+
+    # Compare shapes
+    if out.ndims == 1:  # Vector output
+        expected_input_shape = (row_size,)
+    else:  # Matrix output
+        if type(row_indices) is int:
+            expected_input_shape = (col_size,)
+        elif type(col_indices) is int:
+            expected_input_shape = (row_size,)
+        else:
+            expected_input_shape = (row_size, col_size)
+    if tensor.shape != expected_input_shape:
+        raise GrbDimensionMismatch(f"input shape mismatch: {tensor.shape} != {expected_input_shape}")
+
+    result = impl.assign(tensor, row_indices, col_indices, *out.shape)
+    if mask is not None:
+        result = impl.apply_mask(result, mask, desc)
+    update(out, result, mask, accum, desc)
