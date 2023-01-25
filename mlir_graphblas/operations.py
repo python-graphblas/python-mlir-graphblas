@@ -66,14 +66,14 @@ def update(output: SparseObject,
             # Apply inverted mask, then eWiseAdd
             desc_inverted = Descriptor(mask_complement=not desc.mask_complement,
                                        mask_structure=desc.mask_structure)
-            output._replace(impl.apply_mask(output, mask, desc_inverted))
+            output._replace(impl.select_by_mask(output, mask, desc_inverted))
             result = impl.ewise_add(BinaryOp.oneb, output, tensor)
     elif mask is None or not desc.replace:
         # eWiseAdd using accum
         result = impl.ewise_add(accum, output, tensor)
     else:
         # Mask the output, then perform eWiseAdd using accum
-        output._replace(impl.apply_mask(output, mask, desc))
+        output._replace(impl.select_by_mask(output, mask, desc))
         result = impl.ewise_add(accum, output, tensor)
 
     # If not an intermediate result, make a copy
@@ -107,7 +107,7 @@ def transpose(out: Matrix,
     result = TransposedMatrix.wrap(tensor)
 
     if mask is not None:
-        result = impl.apply_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc)
 
     update(out, result, mask, accum, desc)
 
@@ -149,8 +149,8 @@ def ewise_add(out: SparseTensor,
         raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {left.shape}")
 
     if mask is not None:
-        left = impl.apply_mask(left, mask, desc)
-        right = impl.apply_mask(right, mask, desc)
+        left = impl.select_by_mask(left, mask, desc)
+        right = impl.select_by_mask(right, mask, desc)
 
     result = impl.ewise_add(op, left, right)
     update(out, result, mask, accum, desc)
@@ -192,7 +192,7 @@ def ewise_mult(out: SparseTensor,
 
     if mask is not None:
         # Only need to apply mask to one of the inputs
-        left = impl.apply_mask(left, mask, desc)
+        left = impl.select_by_mask(left, mask, desc)
 
     result = impl.ewise_mult(op, left, right)
     update(out, result, mask, accum, desc)
@@ -244,7 +244,7 @@ def mxm(out: Matrix,
     # TODO: apply the mask during the computation, not at the end
     result = impl.mxm(op, left, right)
     if mask is not None:
-        result = impl.apply_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc)
     update(out, result, mask, accum, desc)
 
 
@@ -284,7 +284,7 @@ def mxv(out: Vector,
     # TODO: apply the mask during the computation, not at the end
     result = impl.mxv(op, left, right)
     if mask is not None:
-        result = impl.apply_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc)
     update(out, result, mask, accum, desc)
 
 
@@ -324,7 +324,7 @@ def vxm(out: Vector,
     # TODO: apply the mask during the computation, not at the end
     result = impl.vxm(op, left, right)
     if mask is not None:
-        result = impl.apply_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc)
     update(out, result, mask, accum, desc)
 
 
@@ -376,7 +376,7 @@ def apply(out: SparseTensor,
         raise GrbDimensionMismatch(f"output shape must match input shape: {out.shape} != {tensor.shape}")
 
     if mask is not None:
-        tensor = impl.apply_mask(tensor, mask, desc)
+        tensor = impl.select_by_mask(tensor, mask, desc)
 
     # Check for inplace apply (out == tensor, Unary/Binary, no masks, no accum, etc)
     if (
@@ -420,7 +420,7 @@ def select(out: SparseTensor,
         raise GrbDimensionMismatch(f"output shape must match input shape: {out.shape} != {tensor.shape}")
 
     if mask is not None:
-        tensor = impl.apply_mask(tensor, mask, desc)
+        tensor = impl.select_by_mask(tensor, mask, desc)
 
     result = impl.select(op, tensor, thunk)
     update(out, result, mask, accum, desc)
@@ -456,7 +456,7 @@ def reduce_to_vector(out: Vector,
     # TODO: apply the mask during the computation, not at the end
     result = impl.reduce_to_vector(op, tensor)
     if mask is not None:
-        result = impl.apply_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc)
     update(out, result, mask, accum, desc)
 
 
@@ -543,7 +543,7 @@ def extract(out: SparseTensor,
 
     result = impl.extract(tensor, row_indices, col_indices, row_size, col_size)
     if mask is not None:
-        result = impl.apply_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc)
     update(out, result, mask, accum, desc)
 
 
@@ -621,5 +621,5 @@ def assign(out: SparseTensor,
 
     result = impl.assign(tensor, row_indices, col_indices, *out.shape)
     if mask is not None:
-        result = impl.apply_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc)
     update(out, result, mask, accum, desc)

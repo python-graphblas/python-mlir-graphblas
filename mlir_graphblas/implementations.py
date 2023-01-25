@@ -1,15 +1,7 @@
 import ctypes
-import numbers
-import math
-import mlir
 import numpy as np
 from typing import Union, Optional
 from mlir import ir
-from mlir import passmanager
-from mlir import execution_engine
-from mlir import runtime
-from mlir import dialects
-
 from mlir.dialects import arith
 from mlir.dialects import bufferization
 from mlir.dialects import func
@@ -29,8 +21,8 @@ from .types import RankedTensorType, BOOL, INT64, FP64
 from .exceptions import GrbIndexOutOfBounds, GrbDimensionMismatch
 
 
-# TODO: vec->matrix broadcasting as builtin param in apply_mask (rowwise/colwise)
-def apply_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL_DESC):
+# TODO: vec->matrix broadcasting as builtin param in select_by_mask (rowwise/colwise)
+def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL_DESC):
     """
     The only elements which survive in `sp` are those with corresponding elements in
     `mask` which are "truthy" (i.e. non-zero).
@@ -62,9 +54,9 @@ def apply_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL
         mask = select(SelectOp.valuene, mask, thunk=zero)
 
     # Build and compile if needed
-    key = ('apply_mask', *sp.get_loop_key(), *mask.get_loop_key(), desc.mask_complement)
+    key = ('select_by_mask', *sp.get_loop_key(), *mask.get_loop_key(), desc.mask_complement)
     if key not in engine_cache:
-        engine_cache[key] = _build_apply_mask(mask, sp, desc.mask_complement)
+        engine_cache[key] = _build_select_by_mask(mask, sp, desc.mask_complement)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
@@ -74,7 +66,7 @@ def apply_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL
                           mask.perceived_ordering, intermediate_result=True)
 
 
-def _build_apply_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool):
+def _build_select_by_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -116,6 +108,64 @@ def _build_apply_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
         return compile(module)
+
+
+def select_by_indices(sp: SparseTensorBase,
+                      row_indices: Optional[list[int]] = None,
+                      col_indices: Optional[list[int]] = None,
+                      complement: bool = False):
+    """
+    Returns a new sparse tensor with the same dtype and shape as `sp`.
+
+    The only elements copied over from `sp` are those with indices found in
+    row_indices and col_indices. Vectors ignore col_indices.
+
+    If complement is True, the inverse logic is applied and indices *not*
+    found in row_indices and col_indices are copied to the output.
+
+    If row_indices is None, all rows are selected (i.e. GrB_ALL).
+    If col_indices is None, all columns are selected (i.e. GrB_ALL).
+    This allows, for example, selecting all rows for a subset of columns
+    without needing to list every possible row index.
+    """
+    if sp.ndims == 1:
+        # Vector
+        assert col_indices is None
+        if row_indices is None:
+            if complement:
+                return Vector.new(sp.dtype, *sp.shape)
+            return dup(sp)
+
+        idx, vals = sp.extract_tuples()
+        row_indices = np.array(row_indices, dtype=np.uint64)
+        selected = np.isin(idx, row_indices, invert=complement)
+        v = Vector.new(sp.dtype, *sp.shape)
+        v.build(idx[selected], vals[selected])
+        return v
+
+    # Matrix
+    if row_indices is None and col_indices is None:
+        if complement:
+            return Matrix.new(sp.dtype, *sp.shape)
+        return dup(sp)
+
+    rowidx, colidx, vals = sp.extract_tuples()
+    if row_indices is not None:
+        row_indices = np.array(row_indices, dtype=np.uint64)
+        rowsel = np.isin(rowidx, row_indices, invert=complement)
+    if col_indices is not None:
+        col_indices = np.array(col_indices, dtype=np.uint64)
+        colsel = np.isin(colidx, col_indices, invert=complement)
+
+    if row_indices is not None and col_indices is not None:
+        sel = (rowsel | colsel) if complement else (rowsel & colsel)
+    elif row_indices is not None:
+        sel = rowsel
+    else:
+        sel = colsel
+    m = Matrix.new(sp.dtype, *sp.shape)
+    m.build(rowidx[sel], colidx[sel], vals[sel])
+    return m
 
 
 def nvals(sp: SparseTensorBase):
