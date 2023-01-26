@@ -165,6 +165,41 @@ def select_by_indices(sp: SparseTensorBase,
         sel = colsel
     m = Matrix.new(sp.dtype, *sp.shape)
     m.build(rowidx[sel], colidx[sel], vals[sel])
+    m._intermediate_result = True
+    return m
+
+
+def build_structural_vector_from_indices(size: int,
+                                         indices: Optional[list[int]] = None):
+    """
+    Returns a new sparse Vector of size `size` with dtype BOOL.
+    All elements in indices are set with a value of True.
+    """
+    v = Vector.new(BOOL, size)
+    if indices is None:
+        indices = np.arange(size)
+    v.build(indices, True)
+    return v
+
+
+def build_structural_matrix_from_indices(nrows: int,
+                                         ncols: int,
+                                         row_indices: Optional[list[int]] = None,
+                                         col_indices: Optional[list[int]] = None,
+                                         colwise=False):
+    """
+    Returns a new sparse Matrix of shape (nrows, ncols) with dtype BOOL.
+    All elements in (row_indices, col_indices) pairs are set with a value of True.
+    """
+    m = Matrix.new(BOOL, nrows, ncols)
+    if row_indices is None:
+        row_indices = np.arange(nrows)
+    if col_indices is None:
+        col_indices = np.arange(ncols)
+    # Build all combinations of indices
+    ridx = np.repeat(row_indices, len(col_indices))
+    cidx = np.tile(col_indices, len(row_indices))
+    m.build(ridx, cidx, True, colwise=colwise)
     return m
 
 

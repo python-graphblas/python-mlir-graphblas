@@ -25,20 +25,32 @@ def update(output: SparseObject,
            tensor: SparseObject,
            mask: Optional[SparseTensor] = None,
            accum: Optional[BinaryOp] = None,
-           desc: Descriptor = NULL_DESC):
+           desc: Descriptor = NULL_DESC,
+           *,
+           row_indices: Optional[list[int]] = None,
+           col_indices: Optional[list[int]] = None):
     """
     This function assumes that if a mask is supplied, it has already been applied to `tensor`
 
     There are six possible results based on presence of mask, accum, replace:
 
     Mask | Accum | Replace | Result
-    -----|-------|---------|---------
+    -----|-------|---------|-------
       Y  |   Y   |    Y    | Mask the output, then perform eWiseAdd using accum
       Y  |   Y   |    N    | Perform eWiseAdd using accum
       N  |   Y   |    ?    | Perform eWiseAdd using accum
       Y  |   N   |    Y    | Set input as output
-      Y  |   N   |    N    | Apply inverted mask, then perform eWiseAdd using any op
+      Y  |   N   |    N    | Apply inverted mask to output, then perform eWiseAdd using any op
       N  |   N   |    ?    | Set input as output
+
+    When row and column indices are provided (for assign), the behavior becomes:
+
+    Mask | Accum | Replace | Result
+    -----|-------|---------|-------
+      ?  |   Y   |    ?    | < Same as above >
+      Y  |   N   |    Y    | Mask the output, drop indices in output, then perform eWiseAdd
+      Y  |   N   |    N    | Select indices in mask, apply inverted mask to output, then perform eWiseAdd
+      N  |   N   |    ?    | Drop indices in output, then perform eWiseAdd
 
     """
     if output.shape != tensor.shape:
@@ -60,13 +72,41 @@ def update(output: SparseObject,
         # accum, mask, replace are meaningless if output is empty
         result = tensor
     elif accum is None:
-        if mask is None or desc.replace:
-            result = tensor
+        # Build inverted descriptor; used below
+        desc_inverted = Descriptor(mask_complement=not desc.mask_complement,
+                                   mask_structure=desc.mask_structure)
+        if row_indices is None and col_indices is None:
+            if mask is None or desc.replace:  # mask=N, accum=N, replace=? -or- mask=Y, accum=N, replace=Y
+                result = tensor
+            else:  # mask=Y, accum=N, replace=N
+                # Apply inverted mask, then eWiseAdd
+                output._replace(impl.select_by_mask(output, mask, desc_inverted))
+                result = impl.ewise_add(BinaryOp.oneb, output, tensor)
         else:
-            # Apply inverted mask, then eWiseAdd
-            desc_inverted = Descriptor(mask_complement=not desc.mask_complement,
-                                       mask_structure=desc.mask_structure)
-            output._replace(impl.select_by_mask(output, mask, desc_inverted))
+            if mask is None:  # mask=N, accum=N, replace=?, w/ indices
+                # Drop indices in output, then eWiseAdd
+                output._replace(impl.select_by_indices(output, row_indices, col_indices, complement=True))
+            elif desc.replace:  # mask=Y, accum=N, replace=Y, w/ indices
+                # Apply mask to output, drop row/col indices from output, then eWiseAdd
+                output._replace(impl.select_by_mask(output, mask, desc))
+                output._replace(impl.select_by_indices(output, row_indices, col_indices, complement=True))
+            else:  # mask=Y, accum=N, replace=N, w/ indices
+                if desc.mask_complement:
+                    # Need to select the row/col indices that aren't in the mask,
+                    #   apply it complemented to the output, then eWiseAdd
+                    # However, you can't select elements that aren't there, so we
+                    # use `build_structural_mask_from_indices` to build all possible assigned indices
+                    # and filter those using the mask.
+                    if output.ndims == 1:
+                        all_indices = impl.build_structural_vector_from_indices(*output.shape, row_indices)
+                    else:
+                        all_indices = impl.build_structural_matrix_from_indices(*output.shape, row_indices, col_indices)
+                    new_mask = impl.select_by_mask(all_indices, mask, desc)
+                    output._replace(impl.select_by_mask(output, new_mask, desc))
+                else:
+                    # Select the row/col indices in the mask, apply it inverted to the output, then eWiseAdd
+                    new_mask = impl.select_by_indices(mask, row_indices, col_indices)
+                    output._replace(impl.select_by_mask(output, new_mask, desc_inverted))
             result = impl.ewise_add(BinaryOp.oneb, output, tensor)
     elif mask is None or not desc.replace:
         # eWiseAdd using accum
@@ -622,4 +662,4 @@ def assign(out: SparseTensor,
     result = impl.assign(tensor, row_indices, col_indices, *out.shape)
     if mask is not None:
         result = impl.select_by_mask(result, mask, desc)
-    update(out, result, mask, accum, desc)
+    update(out, result, mask, accum, desc, row_indices=row_indices, col_indices=col_indices)

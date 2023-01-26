@@ -271,6 +271,7 @@ class Vector(SparseTensor):
 
         indices: list or numpy array of int
         values: list or numpy array with matching dtype as declared in `.new()`
+                can also be a scalar value to make the Vector iso-valued
         dup: BinaryOp used to combined entries with the same index
              NOTE: this is currently not support; passing dup will raise an error
         sparsity: list of string or DimLevelType
@@ -287,7 +288,10 @@ class Vector(SparseTensor):
         if not isinstance(indices, np.ndarray):
             indices = np.array(indices, dtype=np.uint64)
         if not isinstance(values, np.ndarray):
-            values = np.array(values, dtype=self.dtype.np_type)
+            if hasattr(values, '__len__'):
+                values = np.array(values, dtype=self.dtype.np_type)
+            else:
+                values = np.ones(indices.shape, dtype=self.dtype.np_type) * values
         if sparsity is None:
             sparsity = [DimLevelType.compressed]
         self._to_sparse_tensor(indices, values, sparsity=sparsity, ordering=[0])
@@ -363,6 +367,7 @@ class Matrix(SparseTensor):
         row_indices: list or numpy array of int
         col_indices: list or numpy array of int
         values: list or numpy array with matching dtype as declared in `.new()`
+                can also be a scalar value to make the Vector iso-valued
         dup: BinaryOp used to combined entries with the same (row, col) coordinate
              NOTE: this is currently not support; passing dup will raise an error
         sparsity: list of string or DimLevelType
@@ -383,7 +388,10 @@ class Matrix(SparseTensor):
             col_indices = np.array(col_indices, dtype=np.uint64)
         indices = np.stack([row_indices, col_indices], axis=1)
         if not isinstance(values, np.ndarray):
-            values = np.array(values, dtype=self.dtype.np_type)
+            if hasattr(values, '__len__'):
+                values = np.array(values, dtype=self.dtype.np_type)
+            else:
+                values = np.ones(indices.shape, dtype=self.dtype.np_type) * values
         ordering = [1, 0] if colwise else [0, 1]
         if sparsity is None:
             sparsity = [DimLevelType.dense, DimLevelType.compressed]
