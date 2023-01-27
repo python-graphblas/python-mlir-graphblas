@@ -39,6 +39,14 @@ def ensure_scalar_of_type(obj, dtype):
     return s
 
 
+def ensure_unique(indices, name=None):
+    unique = np.unique(indices)
+    if len(unique) < len(indices):
+        unique, counts = np.unique(indices, return_counts=True)
+        name_str = f" in {name}" if name is not None else ""
+        raise ValueError(f"Found duplicate indices{name_str}: {unique[counts > 1]}")
+
+
 def renumber_indices(indices, selected):
     """
     Given a set of non-unique `indices`, returns an array of the same size
@@ -63,6 +71,7 @@ def renumber_indices(indices, selected):
     array([0, 0, 0, 3, 2])
     """
     # Check that values in selected are unique
+    # TODO: fix this; extract must allow non-unique selected indices
     unique = np.unique(selected)
     if unique.size < selected.size:
         unique, counts = np.unique(selected, return_counts=True)

@@ -4,18 +4,18 @@ from .tensor import SparseObject, SparseTensor, SparseTensorBase, Matrix, Vector
 from .operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiring
 from . descriptor import Descriptor, NULL as NULL_DESC
 from .exceptions import (
-    GrbNullPointer, GrbInvalidValue, GrbInvalidIndex, GrbDomainMismatch,
+    GrbError, GrbNullPointer, GrbInvalidValue, GrbInvalidIndex, GrbDomainMismatch,
     GrbDimensionMismatch, GrbOutputNotEmpty, GrbIndexOutOfBounds, GrbEmptyObject
 )
 from . import implementations as impl
-from .utils import ensure_scalar_of_type
-from .types import INT64
+from .utils import ensure_scalar_of_type, ensure_unique
+from .types import BOOL, INT64
 from .operators import BinaryOp, SelectOp
 from mlir.dialects.sparse_tensor import DimLevelType
 
 
 __all__ = ["transpose", "ewise_add", "ewise_mult", "mxm", "apply", "select",
-           "reduce_to_vector", "reduce_to_scalar"]
+           "reduce_to_vector", "reduce_to_scalar", "extract", "assign"]
 
 
 # TODO: at some point, it may make sense to make this logic embeddable within
@@ -98,9 +98,9 @@ def update(output: SparseObject,
                     # use `build_structural_mask_from_indices` to build all possible assigned indices
                     # and filter those using the mask.
                     if output.ndims == 1:
-                        all_indices = impl.build_structural_vector_from_indices(*output.shape, row_indices)
+                        all_indices = impl.build_iso_vector_from_indices(BOOL, *output.shape, row_indices)
                     else:
-                        all_indices = impl.build_structural_matrix_from_indices(*output.shape, row_indices, col_indices)
+                        all_indices = impl.build_iso_matrix_from_indices(BOOL, *output.shape, row_indices, col_indices)
                     new_mask = impl.select_by_mask(all_indices, mask, desc)
                     output._replace(impl.select_by_mask(output, new_mask, desc))
                 else:
@@ -214,7 +214,7 @@ def ewise_mult(out: SparseTensor,
     # Verify dtypes
     if left.dtype != right.dtype:
         raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
-    required_out_dtype = op.get_output_type(left.dtype)
+    required_out_dtype = op.get_output_type(left.dtype, right.dtype)
     if out.dtype != required_out_dtype:
         raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
 
@@ -253,7 +253,7 @@ def mxm(out: Matrix,
     # Verify dtypes
     if left.dtype != right.dtype:
         raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
-    required_out_dtype = op.binop.get_output_type(left.dtype)
+    required_out_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     if out.dtype != required_out_dtype:
         raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
 
@@ -303,7 +303,7 @@ def mxv(out: Vector,
     # Verify dtypes
     if left.dtype != right.dtype:
         raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
-    required_out_dtype = op.binop.get_output_type(left.dtype)
+    required_out_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     if out.dtype != required_out_dtype:
         raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
 
@@ -343,7 +343,7 @@ def vxm(out: Vector,
     # Verify dtypes
     if left.dtype != right.dtype:
         raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
-    required_out_dtype = op.binop.get_output_type(left.dtype)
+    required_out_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     if out.dtype != required_out_dtype:
         raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
 
@@ -383,6 +383,7 @@ def apply(out: SparseTensor,
     if optype is UnaryOp:
         if thunk is not None or left is not None or right is not None:
             raise TypeError("UnaryOp does not accept thunk, left, or right")
+        required_out_dtype = op.get_output_type(tensor.dtype)
     elif optype is BinaryOp:
         if thunk is not None:
             raise TypeError("BinaryOp accepts left or thing, not thunk")
@@ -392,18 +393,20 @@ def apply(out: SparseTensor,
             raise TypeError("Cannot provide both left and right")
         if left is not None:
             left = ensure_scalar_of_type(left, tensor.dtype)
+            required_out_dtype = op.get_output_type(left.dtype, tensor.dtype)
         else:
             right = ensure_scalar_of_type(right, tensor.dtype)
+            required_out_dtype = op.get_output_type(tensor.dtype, right.dtype)
     elif optype is IndexUnaryOp:
         if left is not None or right is not None:
             raise TypeError("IndexUnaryOp accepts thunk, not left or right")
         thunk_dtype = INT64 if op.thunk_as_index else tensor.dtype
         thunk = ensure_scalar_of_type(thunk, thunk_dtype)
+        required_out_dtype = op.get_output_type(tensor.dtype, thunk.dtype)
     else:
         raise TypeError(f"op must be UnaryOp, BinaryOp, or IndexUnaryOp, not {type(op)}")
 
     # Verify dtype
-    required_out_dtype = op.get_output_type(tensor.dtype)
     if out.dtype != required_out_dtype:
         raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
 
@@ -602,9 +605,7 @@ def assign(out: SparseTensor,
     if not isinstance(tensor, SparseObject):
         if not isinstance(tensor, (int, float, bool)):
             raise TypeError(f"tensor must be a SparseObject or Python scalar, not {type(tensor)}")
-        tmp = Scalar.new(out.dtype)
-        tmp.set_element(tensor)
-        tensor = tmp
+        tensor = ensure_scalar_of_type(tensor, out.dtype)
 
     # Verify dtypes
     if out.dtype != tensor.dtype:
@@ -626,17 +627,13 @@ def assign(out: SparseTensor,
         if type(row_indices) is int and type(col_indices) is int:
             raise TypeError("Use `set_element` rather than `assign` to set a single element in the Matrix")
 
-    # Special handling for Scalar input
-    if tensor.ndims == 0:
-        # TODO: implement this
-        raise NotImplementedError("assigning with Scalar input not yet implemented")
-
     # Compute output sizes
     if type(row_indices) is int:
         row_size = None
     elif row_indices is None:
-        row_size = tensor.shape[0]
+        row_size = out.shape[0]
     else:
+        ensure_unique(row_indices, "row_indices")
         row_size = len(row_indices)
 
     if type(col_indices) is int or out.ndims < 2:
@@ -644,22 +641,38 @@ def assign(out: SparseTensor,
     elif col_indices is None:
         col_size = out.shape[1]
     else:
+        ensure_unique(col_indices, "col_indices")
         col_size = len(col_indices)
 
-    # Compare shapes
-    if out.ndims == 1:  # Vector output
-        expected_input_shape = (row_size,)
-    else:  # Matrix output
-        if type(row_indices) is int:
-            expected_input_shape = (col_size,)
-        elif type(col_indices) is int:
-            expected_input_shape = (row_size,)
+    if tensor.ndims == 0:  # Scalar input
+        if row_indices is None and col_indices is None and out.ndims == 2:
+            # Scalar input with GrB_ALL
+            if mask is None:
+                raise GrbError("This will create a dense matrix. Please provide a mask or indices.")
+            # Use mask to build an iso-valued Matrix
+            result = impl.apply(BinaryOp.second, mask, right=tensor)
         else:
-            expected_input_shape = (row_size, col_size)
-    if tensor.shape != expected_input_shape:
-        raise GrbDimensionMismatch(f"input shape mismatch: {tensor.shape} != {expected_input_shape}")
+            if out.ndims == 1:  # Vector output
+                result = impl.build_iso_vector_from_indices(out.dtype, *out.shape, row_indices, tensor)
+            else:  # Matrix output
+                result = impl.build_iso_matrix_from_indices(out.dtype, *out.shape, row_indices, col_indices, tensor, colwise=out.is_colwise())
+            if mask is not None:
+                result = impl.select_by_mask(result, mask, desc)
+    else:  # Vector/Matrix input
+        # Verify expected input shape
+        if out.ndims == 1:  # Vector output
+            expected_input_shape = (row_size,)
+        else:  # Matrix output
+            if type(row_indices) is int:
+                expected_input_shape = (col_size,)
+            elif type(col_indices) is int:
+                expected_input_shape = (row_size,)
+            else:
+                expected_input_shape = (row_size, col_size)
+        if tensor.shape != expected_input_shape:
+            raise GrbDimensionMismatch(f"input shape mismatch: {tensor.shape} != {expected_input_shape}")
 
-    result = impl.assign(tensor, row_indices, col_indices, *out.shape)
-    if mask is not None:
-        result = impl.select_by_mask(result, mask, desc)
+        result = impl.assign(tensor, row_indices, col_indices, *out.shape)
+        if mask is not None:
+            result = impl.select_by_mask(result, mask, desc)
     update(out, result, mask, accum, desc, row_indices=row_indices, col_indices=col_indices)

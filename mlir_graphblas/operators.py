@@ -60,7 +60,9 @@ class _FuncOp(Op):
         If input is defined, it must be one of (bool, int, float) to
             indicate the restricted allowable input dtypes
         If output is defined, it must be one of (bool, int, float) to
-            indicate the output will always be of that type
+            indicate the output will always be of that type or an
+            an integer (0, 1, ...) to indicate that the output dtype
+            will match the dtype of argument 0, 1, ...
         """
         super().__init__(func.__name__)
         self.func = func
@@ -70,7 +72,8 @@ class _FuncOp(Op):
         self.input = input
         # Validate output
         if output is not None:
-            assert output in {bool, int, float}
+            if type(output) is not int:
+                assert output in {bool, int, float}
         self.output = output
 
     @classmethod
@@ -94,9 +97,19 @@ class _FuncOp(Op):
         elif self.input is float and not val_dtype.is_float():
             raise GrbDomainMismatch("input must be float type")
 
-    def get_output_type(self, input_dtype):
+    def get_output_type(self, left_input_dtype, right_input_dtype=None):
         if self.output is None:
-            return input_dtype
+            if right_input_dtype is None:
+                return left_input_dtype
+            if left_input_dtype != right_input_dtype:
+                raise TypeError(f"Unable to infer output type from {left_input_dtype} and {right_input_dtype}")
+            return left_input_dtype
+        elif self.output == 0:
+            return left_input_dtype
+        elif self.output == 1:
+            if right_input_dtype is None:
+                raise TypeError("No type provided for expected 2nd input argument")
+            return right_input_dtype
         return self._type_convert[self.output]
 
 
@@ -132,6 +145,13 @@ class BinaryOp(_FuncOp):
     def __call__(self, x, y):
         dtype = self._dtype_of(x)
         dtype2 = self._dtype_of(y)
+        if self.output == 0:
+            self.validate_input(x)
+            return self.func(x, y, dtype)
+        if self.output == 1:
+            self.validate_input(y)
+            return self.func(x, y, dtype2)
+        # If we reached this point, inputs must have the same dtype
         if dtype is not dtype2:
             raise TypeError(f"Types must match, {dtype} != {dtype2}")
         self.validate_input(x)
@@ -417,12 +437,12 @@ def oneb(x, y, dtype):
 BinaryOp.pair = BinaryOp.oneb
 
 
-@BinaryOp._register
+@BinaryOp._register(output=0)  # dtype matches x
 def first(x, y, dtype):
     return x
 
 
-@BinaryOp._register
+@BinaryOp._register(output=1)  # dtype matches y
 def second(x, y, dtype):
     return y
 

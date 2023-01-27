@@ -5,7 +5,7 @@ import numpy as np
 from numpy.testing import assert_allclose as np_assert_allclose
 from ..tensor import Scalar, Vector, Matrix
 from ..types import BOOL, INT16, INT32, INT64, FP32, FP64
-from .. import operations, descriptor as desc
+from .. import operations, exceptions, descriptor as desc
 from ..operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiring
 from .utils import vector_compare, matrix_compare
 
@@ -402,4 +402,61 @@ def test_assign_vec_to_mat(ms):
                    [-1, -2, -3, -4, 101, -5])
 
 
-# TODO: test assign with scalar input
+def test_assign_scalar_to_vec(vs):
+    x, _ = vs
+
+    # Assign indices
+    z1 = x.dup()
+    operations.assign(z1, 42.1, [0, 3])
+    vector_compare(z1, [0, 1, 2, 3], [42.1, 10., 20., 42.1])
+
+    # Assign GrB_ALL (this creates a dense Vector)
+    z2 = x.dup()
+    operations.assign(z2, 43., None)
+    vector_compare(z2, [0, 1, 2, 3, 4], [43.]*5)
+
+    # Assign GrB_ALL with mask
+    mask = Vector.new(BOOL, *x.shape)
+    mask.build([0, 2], [1, 1])
+    z3 = x.dup()
+    operations.assign(z3, 44., mask=mask, desc=desc.S)
+    vector_compare(z3, [0, 1, 2, 3], [44., 10., 44., 30.])
+
+
+def test_assign_scalar_to_mat(ms):
+    x, _ = ms
+
+    # Assign indices
+    z1 = x.dup()
+    operations.assign(z1, 95, [0, 1], [3, 1, 2])
+    matrix_compare(z1,
+                   [0, 0, 0, 1, 1, 1, 1, 1],
+                   [1, 2, 3, 0, 1, 2, 3, 4],
+                   [95, 95, 95, -3, 95, 95, 95, -5])
+
+    # Assign rows
+    z2 = x.dup()
+    operations.assign(z2, 96, None, [1, 4])
+    matrix_compare(z2, [0, 0, 0, 1, 1, 1], [1, 3, 4, 0, 1, 4], [96, -2, 96, -3, 96, 96])
+
+    # Assign cols
+    z3 = x.dup()
+    operations.assign(z3, 97, [0], None)
+    matrix_compare(z3,
+                   [0, 0, 0, 0, 0, 1, 1, 1],
+                   [0, 1, 2, 3, 4, 0, 1, 4],
+                   [97, 97, 97, 97, 97, -3, -4, -5])
+
+    # Assign GrB_ALL with mask
+    z4 = x.dup()
+    mask = Matrix.new(BOOL, *x.shape)
+    mask.build([0, 0, 1, 1], [2, 3, 1, 2], [1, 1, 1, 1])
+    operations.assign(z4, 98, mask=mask)
+    matrix_compare(z4,
+                   [0, 0, 0, 1, 1, 1, 1],
+                   [1, 2, 3, 0, 1, 2, 4],
+                   [-1, 98, 98, -3, 98, 98, -5])
+
+    # Assign GrB_ALL without mask raises error
+    with pytest.raises(exceptions.GrbError, match="dense matrix"):
+        operations.assign(x, 99)

@@ -266,7 +266,7 @@ def test_assign_mask(assign_mats):
     matrix_compare(x, [0, 0, 0, 1, 1, 2, 2], [0, 1, 2, 1, 2, 0, 1], [1, 2, 13, 5, 6, 11, 8])
 
 
-def test_assign_mask_complement_zz(assign_mats):
+def test_assign_mask_complement(assign_mats):
     x, y, mask = assign_mats
     x1 = x.dup()
     operations.assign(x1, y, [0, 2], [0, 2], mask=mask, desc=descriptor.SC)

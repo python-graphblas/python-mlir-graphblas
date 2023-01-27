@@ -139,7 +139,7 @@ def select_by_indices(sp: SparseTensorBase,
         idx, vals = sp.extract_tuples()
         row_indices = np.array(row_indices, dtype=np.uint64)
         selected = np.isin(idx, row_indices, invert=complement)
-        v = Vector.new(sp.dtype, *sp.shape)
+        v = Vector.new(sp.dtype, *sp.shape, intermediate_result=True)
         v.build(idx[selected], vals[selected])
         return v
 
@@ -163,43 +163,53 @@ def select_by_indices(sp: SparseTensorBase,
         sel = rowsel
     else:
         sel = colsel
-    m = Matrix.new(sp.dtype, *sp.shape)
+    m = Matrix.new(sp.dtype, *sp.shape, intermediate_result=True)
     m.build(rowidx[sel], colidx[sel], vals[sel])
-    m._intermediate_result = True
     return m
 
 
-def build_structural_vector_from_indices(size: int,
-                                         indices: Optional[list[int]] = None):
+def build_iso_vector_from_indices(dtype,
+                                  size: int,
+                                  indices: Optional[list[int]] = None,
+                                  value=1):
     """
-    Returns a new sparse Vector of size `size` with dtype BOOL.
-    All elements in indices are set with a value of True.
+    Returns a new sparse Vector of size `size` with all
+    elements in indices set to `value`.
     """
-    v = Vector.new(BOOL, size)
+    v = Vector.new(dtype, size, intermediate_result=True)
     if indices is None:
         indices = np.arange(size)
-    v.build(indices, True)
+    if not hasattr(indices, '__len__'):
+        raise TypeError(f"indices must be a tuple/list/array, not {type(indices)}")
+    v.build(indices, value)
     return v
 
 
-def build_structural_matrix_from_indices(nrows: int,
-                                         ncols: int,
-                                         row_indices: Optional[list[int]] = None,
-                                         col_indices: Optional[list[int]] = None,
-                                         colwise=False):
+def build_iso_matrix_from_indices(dtype,
+                                  nrows: int,
+                                  ncols: int,
+                                  row_indices: Optional[list[int]] = None,
+                                  col_indices: Optional[list[int]] = None,
+                                  value=1,
+                                  *,
+                                  colwise=False):
     """
-    Returns a new sparse Matrix of shape (nrows, ncols) with dtype BOOL.
-    All elements in (row_indices, col_indices) pairs are set with a value of True.
+    Returns a new sparse Matrix of shape (nrows, ncols) with all
+    elements in (row_indices, col_indices) pairs set to `value`.
     """
-    m = Matrix.new(BOOL, nrows, ncols)
+    m = Matrix.new(dtype, nrows, ncols, intermediate_result=True)
     if row_indices is None:
         row_indices = np.arange(nrows)
     if col_indices is None:
         col_indices = np.arange(ncols)
+    if not hasattr(row_indices, '__len__'):
+        raise TypeError(f"row_indices must be a tuple/list/array, not {type(row_indices)}")
+    if not hasattr(col_indices, '__len__'):
+        raise TypeError(f"col_indices must be a tuple/list/array, not {type(col_indices)}")
     # Build all combinations of indices
     ridx = np.repeat(row_indices, len(col_indices))
     cidx = np.tile(col_indices, len(row_indices))
-    m.build(ridx, cidx, True, colwise=colwise)
+    m.build(ridx, cidx, value, colwise=colwise)
     return m
 
 
@@ -304,7 +314,7 @@ def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return left.baseclass(op.get_output_type(left.dtype), left.shape, mem_out,
+    return left.baseclass(op.get_output_type(left.dtype, right.dtype), left.shape, mem_out,
                           left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
@@ -371,12 +381,12 @@ def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return left.baseclass(op.get_output_type(left.dtype), left.shape, mem_out,
+    return left.baseclass(op.get_output_type(left.dtype, right.dtype), left.shape, mem_out,
                           left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
 def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
-    op_result_dtype = op.get_output_type(left.dtype)
+    op_result_dtype = op.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -436,12 +446,12 @@ def mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Matrix(op.binop.get_output_type(left.dtype), [left.shape[0], right.shape[1]], mem_out,
+    return Matrix(op.binop.get_output_type(left.dtype, right.dtype), [left.shape[0], right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
 def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
-    op_result_dtype = op.binop.get_output_type(left.dtype)
+    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -512,12 +522,12 @@ def mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(op.binop.get_output_type(left.dtype), [left.shape[0]], mem_out,
+    return Vector(op.binop.get_output_type(left.dtype, right.dtype), [left.shape[0]], mem_out,
                   right._sparsity, right.perceived_ordering, intermediate_result=True)
 
 
 def _build_mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
-    op_result_dtype = op.binop.get_output_type(left.dtype)
+    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -586,12 +596,12 @@ def vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(op.binop.get_output_type(left.dtype), [right.shape[1]], mem_out,
+    return Vector(op.binop.get_output_type(left.dtype, right.dtype), [right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
 def _build_vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
-    op_result_dtype = op.binop.get_output_type(left.dtype)
+    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -645,38 +655,40 @@ def _build_vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix
 
 def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
           sp: SparseTensorBase,
-          left: Optional[Scalar],
-          right: Optional[Scalar],
-          thunk: Optional[Scalar],
+          left: Optional[Scalar] = None,
+          right: Optional[Scalar] = None,
+          thunk: Optional[Scalar] = None,
           inplace: bool = False):
     rank = sp.ndims
     if rank == 0:  # Scalar
         # TODO: implement this
         raise NotImplementedError("doesn't yet work for Scalar")
 
-    # Handle case of empty tensor
-    if sp._obj is None:
-        return sp.__class__(op.get_output_type(sp.dtype), sp.shape)
+    # TODO: handle case of empty input (must figure out correct output dtype)
 
     # Build and compile if needed
     # Note that Scalars are included in the key because they are inlined in the compiled code
     optype = type(op)
     if optype is UnaryOp:
         key = ('apply_unary', op.name, *sp.get_loop_key(), inplace)
+        output_dtype = op.get_output_type(sp.dtype)
     elif optype is BinaryOp:
         if left is not None:
             key = ('apply_bind_first', op.name, *sp.get_loop_key(), left._obj, inplace)
+            output_dtype = op.get_output_type(left.dtype, sp.dtype)
         else:
             key = ('apply_bind_second', op.name, *sp.get_loop_key(), right._obj, inplace)
+            output_dtype = op.get_output_type(sp.dtype, right.dtype)
     else:
         if inplace:
             raise TypeError("apply inplace not supported for IndexUnaryOp")
         key = ('apply_indexunary', op.name, *sp.get_loop_key(), thunk._obj)
+        output_dtype = op.get_output_type(sp.dtype, thunk.dtype)
     if key not in engine_cache:
         if inplace:
             engine_cache[key] = _build_apply_inplace(op, sp, left, right)
         else:
-            engine_cache[key] = _build_apply(op, sp, left, right, thunk)
+            engine_cache[key] = _build_apply(op, sp, left, right, thunk, output_dtype)
 
     # Call the compiled function
     if inplace:
@@ -685,17 +697,17 @@ def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
     mem_out = get_sparse_output_pointer()
     arg_pointers = [sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return sp.baseclass(op.get_output_type(sp.dtype), sp.shape, mem_out,
-                            sp._sparsity, sp.perceived_ordering, intermediate_result=True)
+    return sp.baseclass(output_dtype, sp.shape, mem_out,
+                        sp._sparsity, sp.perceived_ordering, intermediate_result=True)
 
 
 def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
                  sp: SparseTensorBase,
                  left: Optional[Scalar],
                  right: Optional[Scalar],
-                 thunk: Optional[Scalar]):
+                 thunk: Optional[Scalar],
+                 output_dtype):
     optype = type(op)
-    op_result_dtype = op.get_output_type(sp.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -703,11 +715,11 @@ def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
             index = ir.IndexType.get()
             i64 = ir.IntegerType.get_signless(64)
             dtype = sp.dtype.build_mlir_type()
-            dtype_out = op_result_dtype.build_mlir_type()
+            dtype_out = output_dtype.build_mlir_type()
             perm = ir.AffineMap.get_permutation(sp.permutation)
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt = sp.rtt.as_mlir_type()
-            rtt_out = sp.rtt.copy(dtype=op_result_dtype, ordering=sp.perceived_ordering).as_mlir_type()
+            rtt_out = sp.rtt.copy(dtype=output_dtype, ordering=sp.perceived_ordering).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt)
             def main(x):
