@@ -16,7 +16,7 @@ from .tensor import SparseTensorBase, SparseTensor, Matrix, Vector, Scalar, Tran
 from .operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiring
 from .compiler import compile, engine_cache
 from . descriptor import Descriptor, NULL as NULL_DESC
-from .utils import get_sparse_output_pointer, get_scalar_output_pointer, renumber_indices
+from .utils import get_sparse_output_pointer, get_scalar_output_pointer, pick_and_renumber_indices
 from .types import RankedTensorType, BOOL, INT64, FP64
 from .exceptions import GrbIndexOutOfBounds, GrbDimensionMismatch
 
@@ -1010,14 +1010,11 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_si
         if row_indices is None:  # None indicates GrB_ALL
             return dup(tensor)
 
-        rowidx, vals = tensor.extract_tuples()
-        row_indices = np.array(row_indices, dtype=np.uint64)
-        selected = np.isin(rowidx, row_indices)
-        # Filter and renumber rowidx
-        rowidx, vals = rowidx[selected], vals[selected]
-        rowidx = renumber_indices(rowidx, row_indices)
+        idx, vals = tensor.extract_tuples()
+        pick_list = np.array(row_indices, dtype=np.uint64)
+        idx, vals = pick_and_renumber_indices(pick_list, idx, vals)
         v = Vector.new(tensor.dtype, row_size)
-        v.build(rowidx, vals)
+        v.build(idx, vals)
         return v
 
     # Matrix
@@ -1026,28 +1023,26 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_si
 
     rowidx, colidx, vals = tensor.extract_tuples()
     if row_indices is not None:
-        rindices_arr = np.array(row_indices, dtype=np.uint64)
-        rowsel = np.isin(rowidx, rindices_arr)
-        # Filter and renumber rowidx
-        rowidx, colidx, vals = rowidx[rowsel], colidx[rowsel], vals[rowsel]
-        if type(row_indices) is not int:
-            rowidx = renumber_indices(rowidx, rindices_arr)
+        if type(row_indices) is int:
+            pick_list = np.array([row_indices], dtype=np.uint64)
+        else:
+            pick_list = np.array(row_indices, dtype=np.uint64)
+        rowidx, colidx, vals = pick_and_renumber_indices(pick_list, rowidx, colidx, vals)
     if col_indices is not None:
-        cindices_arr = np.array(col_indices, dtype=np.uint64)
-        colsel = np.isin(colidx, cindices_arr)
-        # Filter and renumber colidx
-        rowidx, colidx, vals = rowidx[colsel], colidx[colsel], vals[colsel]
-        if type(col_indices) is not int:
-            colidx = renumber_indices(colidx, cindices_arr)
+        if type(col_indices) is int:
+            pick_list = np.array([col_indices], dtype=np.uint64)
+        else:
+            pick_list = np.array(col_indices, dtype=np.uint64)
+        colidx, rowidx, vals = pick_and_renumber_indices(pick_list, colidx, rowidx, vals)
     if type(row_indices) is int:
         # Extract row as Vector
-        assert np.all(rowidx == row_indices)
+        assert np.all(rowidx == 0)
         v = Vector.new(tensor.dtype, col_size)
         v.build(colidx, vals)
         return v
     if type(col_indices) is int:
         # Extract col as Vector
-        assert np.all(colidx == col_indices)
+        assert np.all(colidx == 0)
         v = Vector.new(tensor.dtype, row_size)
         v.build(rowidx, vals)
         return v

@@ -47,47 +47,43 @@ def ensure_unique(indices, name=None):
         raise ValueError(f"Found duplicate indices{name_str}: {unique[counts > 1]}")
 
 
-def renumber_indices(indices, selected):
+def pick_and_renumber_indices(selected, indices, *related):
     """
-    Given a set of non-unique `indices`, returns an array of the same size
-    as `indices` with values renumbered according to the positions in `selected`.
+    This function is used by the `extract` operation.
 
-    All values in indices must also be found in selected.
+    Picks elements from indices as indicated in `selected`. The new indices will
+    be renumbered according to the position in `selected`. Related ndarrays will
+    maintain matching order during the picking, but values will not be changed.
 
-    If these were Python lists instead of numpy arrays, this would be
-    equivalent to calling `[selected.index(x) for x in indices]`.
-    However, this will be much faster as it uses numpy to perform
-    the lookups.
-
-    :param indices: ndarray of non-unique positive integers
-    :param selected: ndarray of unique positive integers
-    :return: ndarray of same length as indices
-
-    Example
-    -------
-    >>> a = np.array([1, 1, 1, 3, 5])
-    >>> b = np.array([1, 2, 5, 3])
-    >>> renumber_indices(a, b)
-    array([0, 0, 0, 3, 2])
+    :param selected: values to pick from indices in the order indicated
+    :param indices: ndarray representing indices
+    :param related: list of ndarray of the same length as indices that must maintain
+                    proper relationship as indices are picked and rearranged
+    :return: tuple of modified ndarrays -- (indices, *related)
     """
-    # Check that values in selected are unique
-    # TODO: fix this; extract must allow non-unique selected indices
-    unique = np.unique(selected)
-    if unique.size < selected.size:
-        unique, counts = np.unique(selected, return_counts=True)
-        raise ValueError(f"Found duplicate values in `selected`: {unique[counts > 1]}")
-
-    # Check for required inclusion criteria
-    not_found = np.setdiff1d(indices, selected)
-    if not_found.size > 0:
-        raise KeyError(f"Found values in `indices` not contained in `selected`: {not_found}")
-
-    # To be efficient, the searching must be done on a sorted array
-    # Build the sort_order to map back to the original order
-    sort_order = np.argsort(selected)
-    renumbered_indices = np.arange(len(selected), dtype=indices.dtype)[sort_order]
-    pos = np.searchsorted(selected[sort_order], indices)
-    return renumbered_indices[pos]
+    for r in related:
+        assert len(r) == len(indices)
+    # Ensure indices are sorted (this is needed for np.searchsorted)
+    sort_order = np.argsort(indices)
+    indices = indices[sort_order]
+    related = [r[sort_order] for r in related]
+    # Find which `selected` exist in indices
+    is_found = np.isin(selected, indices)
+    selfound = selected[is_found]
+    # Perform sorted search of first and last occurrence
+    # Duplicates are handled by building a ramp of indexes between first and last
+    pick_start = np.searchsorted(indices, selfound, side='left')
+    pick_end = np.searchsorted(indices, selfound, side='right')
+    pick_delta = pick_end - pick_start
+    expanded_pick = np.ones(pick_delta.sum(), dtype=np.int64)
+    expanded_pick[0] = pick_start[0]
+    expanded_pick[np.cumsum(pick_delta)[:-1]] += pick_start[1:] - pick_end[:-1]
+    pick_index = np.cumsum(expanded_pick)
+    # Use pick_index to index into related arrays
+    new_related = [r[pick_index] for r in related]
+    # Build new indices by repeating range
+    new_indices = np.repeat(np.arange(len(selected), dtype=np.uint64)[is_found], pick_delta)
+    return new_indices, *new_related
 
 
 # https://mlir.llvm.org/docs/Dialects/ArithOps/#arithcmpi-mlirarithcmpiop

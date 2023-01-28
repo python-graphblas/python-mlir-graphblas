@@ -3,20 +3,12 @@ import numpy as np
 from mlir_graphblas import utils
 
 
-def test_renumber_indices():
-    a = np.array([1, 1, 1, 3, 5], dtype=np.uint64)
-    b = np.array([1, 2, 5, 3], dtype=np.uint64)
-    c = utils.renumber_indices(a, b)
-    assert c.dtype == np.uint64
-    np.testing.assert_equal(c, [0, 0, 0, 3, 2])
-
-    d = np.array([1, 2, 5, 47, 48, 49, 3], dtype=np.uint64)
-    e = utils.renumber_indices(a, d)
-    np.testing.assert_equal(e, [0, 0, 0, 6, 2])
-
-
-def test_renumber_indices_errors():
-    with pytest.raises(ValueError, match="4"):
-        utils.renumber_indices(np.array([1, 1, 1, 3, 5]), np.array([1, 4, 2, 5, 3, 4]))
-    with pytest.raises(KeyError, match="11"):
-        utils.renumber_indices(np.array([1, 2, 5, 11]), np.array([1, 2, 5, 3, 4]))
+def test_pick_and_renumber_indices():
+    rows = np.array([0, 0, 1, 1, 1, 1], dtype=np.uint64)
+    cols = np.array([1, 2, 0, 1, 2, 3], dtype=np.uint64)
+    vals = np.array([1, 2, 6, 7, 8, 9])
+    selected = np.array([1, 1, 0, 0, 1])
+    rows, cols, vals = utils.pick_and_renumber_indices(selected, rows, cols, vals)
+    np.testing.assert_equal(rows, [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4])
+    np.testing.assert_equal(cols, [0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 1, 2, 0, 1, 2, 3])
+    np.testing.assert_equal(vals, [6, 7, 8, 9, 6, 7, 8, 9, 1, 2, 1, 2, 6, 7, 8, 9])

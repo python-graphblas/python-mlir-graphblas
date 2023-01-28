@@ -251,6 +251,11 @@ def test_extract_vec(vs):
     operations.extract(z2, x, None)
     vector_compare(z2, xidx, xvals)
 
+    # Extract duplicates
+    z3 = Vector.new(x.dtype, 5)
+    operations.extract(z3, x, [0, 3, 3, 3, 2])
+    vector_compare(z3, [1, 2, 3, 4], [30., 30., 30., 20.])
+
 
 def test_extract_mat(mm):
     x, _ = mm
@@ -262,22 +267,22 @@ def test_extract_mat(mm):
     matrix_compare(z, xrows, xcols, xvals)
 
     # Extract some rows, some cols
-    z2 = Matrix.new(x.dtype, 2, 4)
-    operations.extract(z2, x, [0, 4], [1, 2, 3, 5])
-    matrix_compare(z2, [0, 0, 1], [2, 3, 1], [1.1, 2.2, 6.6])
+    z2 = Matrix.new(x.dtype, 2, 5)
+    operations.extract(z2, x, [0, 4], [1, 2, 3, 5, 3])
+    matrix_compare(z2, [0, 0, 0, 1], [2, 3, 4, 1], [1.1, 2.2, 1.1, 6.6])
 
     # Extract some rows, all cols
-    z3 = Matrix.new(x.dtype, 2, x.shape[1])
-    operations.extract(z3, x, [0, 4], None)
-    matrix_compare(z3, [0, 0, 1], [3, 5, 2], [1.1, 2.2, 6.6])
+    z3 = Matrix.new(x.dtype, 4, x.shape[1])
+    operations.extract(z3, x, [0, 4, 3, 0], None)
+    matrix_compare(z3, [0, 0, 1, 3, 3], [3, 5, 2, 3, 5], [1.1, 2.2, 6.6, 1.1, 2.2])
 
     # Extract all rows, some cols
-    z4 = Matrix.new(x.dtype, x.shape[0], 4)
-    operations.extract(z4, x, None, [1, 5, 3, 2])
+    z4 = Matrix.new(x.dtype, x.shape[0], 5)
+    operations.extract(z4, x, None, [1, 5, 3, 2, 1])
     matrix_compare(z4,
-                   [0, 0, 1, 2, 4],
-                   [1, 2, 2, 0, 3],
-                   [2.2, 1.1, 3.3, 5.5, 6.6])
+                   [0, 0, 1, 2, 2, 4],
+                   [1, 2, 2, 0, 4, 3],
+                   [2.2, 1.1, 3.3, 5.5, 5.5, 6.6])
 
 
 def test_extract_vec_from_mat(mm):
@@ -293,9 +298,9 @@ def test_extract_vec_from_mat(mm):
     vector_compare(z1, [0, 1], [1.1, 3.3])
 
     # Extract partial row
-    z2 = Vector.new(x.dtype, 5)
-    operations.extract(z2, x, 0, [0, 1, 3, 4, 5])
-    vector_compare(z2, [2, 4], [1.1, 2.2])
+    z2 = Vector.new(x.dtype, 8)
+    operations.extract(z2, x, 0, [0, 1, 3, 4, 5, 3, 5, 3])
+    vector_compare(z2, [2, 4, 5, 6, 7], [1.1, 2.2, 1.1, 2.2, 1.1])
 
     # Extract full row
     z3 = Vector.new(x.dtype, x.shape[1])
