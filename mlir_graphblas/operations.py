@@ -116,6 +116,10 @@ def update(output: SparseObject,
         output._replace(impl.select_by_mask(output, mask, desc))
         result = impl.ewise_add(accum, output, tensor)
 
+    if result is output:
+        # This can happen if empty tensors are used as input
+        return output
+
     # If not an intermediate result, make a copy
     if not result._intermediate_result:
         result = impl.dup(result)

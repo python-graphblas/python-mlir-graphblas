@@ -295,15 +295,18 @@ def _build_dup(sp: SparseTensorBase):
 def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     assert left.ndims == right.ndims
     assert left.dtype == right.dtype
+
+    if left._obj is None:
+        return right
+    if right._obj is None:
+        return left
+
     assert left._sparsity == right._sparsity
 
     rank = left.ndims
     if rank == 0:  # Scalar
         # TODO: implement this
         raise NotImplementedError("doesn't yet work for Scalar")
-
-    # TODO: handle case of either left or right not having an _obj -> result will be other for ewise_add
-    #       or have a utility to build an empty MLIRSparseTensor for all input tensors?
 
     # Build and compile if needed
     key = ('ewise_add', op.name, *left.get_loop_key(), *right.get_loop_key())
@@ -363,14 +366,18 @@ def _build_ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBa
 def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     assert left.ndims == right.ndims
     assert left.dtype == right.dtype
+
+    if left._obj is None:
+        return left
+    if right._obj is None:
+        return right
+
     assert left._sparsity == right._sparsity
 
     rank = left.ndims
     if rank == 0:  # Scalar
         # TODO: implement this
         raise NotImplementedError("doesn't yet work for Scalar")
-
-    # TODO: handle case of either left or right not having an _obj -> result will be empty for ewise_mult
 
     # Build and compile if needed
     key = ('ewise_mult', op.name, *left.get_loop_key(), *right.get_loop_key())
@@ -433,9 +440,12 @@ def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorB
 def mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
     assert left.ndims == right.ndims == 2
     assert left.dtype == right.dtype
-    assert left._sparsity == right._sparsity
 
-    # TODO: handle case of either left or right not having an _obj -> result will be empty for mxm
+    optype = op.binop.get_output_type(left.dtype, right.dtype)
+    if left._obj is None or right._obj is None:
+        return Matrix.new(optype, left.shape[0], right.shape[1])
+
+    assert left._sparsity == right._sparsity
 
     # Build and compile if needed
     key = ('mxm', op.name, *left.get_loop_key(), *right.get_loop_key())
@@ -446,7 +456,7 @@ def mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Matrix(op.binop.get_output_type(left.dtype, right.dtype), [left.shape[0], right.shape[1]], mem_out,
+    return Matrix(optype, [left.shape[0], right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
@@ -509,9 +519,10 @@ def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union
 def mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
     assert left.ndims == 2
     assert right.ndims == 1
-    assert left.dtype == right.dtype
 
-    # TODO: handle case of either left or right not having an _obj -> result will be empty for mxv
+    optype = op.binop.get_output_type(left.dtype, right.dtype)
+    if left._obj is None or right._obj is None:
+        return Vector.new(optype, left.shape[0])
 
     # Build and compile if needed
     key = ('mxv', op.name, *left.get_loop_key(), *right.get_loop_key())
@@ -522,7 +533,7 @@ def mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(op.binop.get_output_type(left.dtype, right.dtype), [left.shape[0]], mem_out,
+    return Vector(optype, [left.shape[0]], mem_out,
                   right._sparsity, right.perceived_ordering, intermediate_result=True)
 
 
@@ -583,9 +594,10 @@ def _build_mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vecto
 def vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
     assert left.ndims == 1
     assert right.ndims == 2
-    assert left.dtype == right.dtype
 
-    # TODO: handle case of either left or right not having an _obj -> result will be empty for vxm
+    optype = op.binop.get_output_type(left.dtype, right.dtype)
+    if left._obj is None or right._obj is None:
+        return Vector.new(optype, right.shape[1])
 
     # Build and compile if needed
     key = ('vxm', op.name, *left.get_loop_key(), *right.get_loop_key())
@@ -596,7 +608,7 @@ def vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(op.binop.get_output_type(left.dtype, right.dtype), [right.shape[1]], mem_out,
+    return Vector(optype, [right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
@@ -664,26 +676,34 @@ def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
         # TODO: implement this
         raise NotImplementedError("doesn't yet work for Scalar")
 
-    # TODO: handle case of empty input (must figure out correct output dtype)
-
-    # Build and compile if needed
-    # Note that Scalars are included in the key because they are inlined in the compiled code
+    # Find output dtype
     optype = type(op)
     if optype is UnaryOp:
-        key = ('apply_unary', op.name, *sp.get_loop_key(), inplace)
         output_dtype = op.get_output_type(sp.dtype)
     elif optype is BinaryOp:
         if left is not None:
-            key = ('apply_bind_first', op.name, *sp.get_loop_key(), left._obj, inplace)
             output_dtype = op.get_output_type(left.dtype, sp.dtype)
         else:
-            key = ('apply_bind_second', op.name, *sp.get_loop_key(), right._obj, inplace)
             output_dtype = op.get_output_type(sp.dtype, right.dtype)
     else:
         if inplace:
             raise TypeError("apply inplace not supported for IndexUnaryOp")
-        key = ('apply_indexunary', op.name, *sp.get_loop_key(), thunk._obj)
         output_dtype = op.get_output_type(sp.dtype, thunk.dtype)
+
+    if sp._obj is None:
+        return sp.baseclass(output_dtype, sp.shape)
+
+    # Build and compile if needed
+    # Note that Scalars are included in the key because they are inlined in the compiled code
+    if optype is UnaryOp:
+        key = ('apply_unary', op.name, *sp.get_loop_key(), inplace)
+    elif optype is BinaryOp:
+        if left is not None:
+            key = ('apply_bind_first', op.name, *sp.get_loop_key(), left._obj, inplace)
+        else:
+            key = ('apply_bind_second', op.name, *sp.get_loop_key(), right._obj, inplace)
+    else:
+        key = ('apply_indexunary', op.name, *sp.get_loop_key(), thunk._obj)
     if key not in engine_cache:
         if inplace:
             engine_cache[key] = _build_apply_inplace(op, sp, left, right)
@@ -887,7 +907,8 @@ def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
 
 
 def reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
-    # TODO: handle case of mat not having an _obj -> result will be empty vector
+    if mat._obj is None:
+        return Vector.new(mat.dtype, mat.shape[0])
 
     # Build and compile if needed
     key = ('reduce_to_vector', op.name, *mat.get_loop_key())
@@ -944,7 +965,8 @@ def _build_reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
 
 
 def reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
-    # TODO: handle case of sp not having an _obj -> result will be empty scalar
+    if sp._obj is None:
+        return Scalar.new(sp.dtype)
 
     # Build and compile if needed
     key = ('reduce_to_scalar', op.name, *sp.get_loop_key())

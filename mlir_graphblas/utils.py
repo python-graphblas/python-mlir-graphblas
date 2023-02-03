@@ -63,6 +63,8 @@ def pick_and_renumber_indices(selected, indices, *related):
     """
     for r in related:
         assert len(r) == len(indices)
+    if len(indices) == 0:
+        return indices, *related
     # Ensure indices are sorted (this is needed for np.searchsorted)
     sort_order = np.argsort(indices)
     indices = indices[sort_order]

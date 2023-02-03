@@ -132,6 +132,10 @@ class SparseTensor(SparseTensorBase):
     def _replace(self, tensor: SparseObject):
         if not tensor._intermediate_result and tensor._obj is not None:
             raise ValueError("Can only replace using intermediate values")
+        if tensor.shape != self.shape:
+            raise GrbDimensionMismatch("Replace only allowed with same shape object")
+        if tensor.dtype != self.dtype:
+            raise GrbDomainMismatch("Replace only allowed with same dtype")
         self.clear()
         self._obj = tensor._obj
         self._sparsity = tensor._sparsity
@@ -150,18 +154,19 @@ class SparseTensor(SparseTensorBase):
         np_perm = np.array(ordering, dtype=np.uint64)
 
         # Validate indices are within range
-        if np_indices.min() < 0:
-            raise GrbIndexOutOfBounds(f"negative indices not allowed: {np_indices.min()}")
-        if self.ndims == 2:
-            max_row = np_indices[:, 0].max()
-            max_col = np_indices[:, 1].max()
-            if max_row >= self.shape[0]:
-                raise GrbIndexOutOfBounds(f"row index out of bounds: {max_row} >= {self.shape[0]}")
-            if max_col >= self.shape[1]:
-                raise GrbIndexOutOfBounds(f"col index out of bound: {max_col} >= {self.shape[1]}")
-        else:
-            if np_indices.max() >= self.shape[0]:
-                raise GrbIndexOutOfBounds(f"index out of bounds: {np_indices.max()} >= {self.shape[0]}")
+        if len(np_indices) > 0:
+            if np_indices.min() < 0:
+                raise GrbIndexOutOfBounds(f"negative indices not allowed: {np_indices.min()}")
+            if self.ndims == 2:
+                max_row = np_indices[:, 0].max()
+                max_col = np_indices[:, 1].max()
+                if max_row >= self.shape[0]:
+                    raise GrbIndexOutOfBounds(f"row index out of bounds: {max_row} >= {self.shape[0]}")
+                if max_col >= self.shape[1]:
+                    raise GrbIndexOutOfBounds(f"col index out of bound: {max_col} >= {self.shape[1]}")
+            else:
+                if np_indices.max() >= self.shape[0]:
+                    raise GrbIndexOutOfBounds(f"index out of bounds: {np_indices.max()} >= {self.shape[0]}")
 
         rank = ctypes.c_ulonglong(len(np_shape))
         nse = ctypes.c_ulonglong(len(np_values))
@@ -230,7 +235,7 @@ class Scalar(SparseObject):
         return 1
 
     def set_element(self, val):
-        self._obj = self.dtype.np_type(val)
+        self._obj = val if val is None else self.dtype.np_type(val)
 
     def extract_element(self):
         if self._obj is None:
@@ -468,9 +473,13 @@ class TransposedMatrix(SparseTensorBase):
         return '?'
 
     def is_rowwise(self):
+        if self._ordering is None:
+            return True
         return tuple(self._ordering) == self.permutation
 
     def is_colwise(self):
+        if self._ordering is None:
+            return True
         return tuple(self._ordering) != self.permutation
 
     def nrows(self):

@@ -53,6 +53,21 @@ def test_transpose_op(mm):
     matrix_compare(z, xrows, xcols, xvals)
 
 
+def test_transpose_empty(mm):
+    # Empty into empty
+    a = Matrix.new(INT32, 6, 7)
+    b = Matrix.new(INT32, 7, 6)
+    operations.transpose(a, b)
+    assert a._obj is None
+
+    # Empty accum into non-empty
+    z, _ = mm
+    zdata = z.extract_tuples()
+    x = Matrix.new(z.dtype, z.shape[1], z.shape[0])
+    operations.transpose(z, x, accum=BinaryOp.plus)
+    matrix_compare(z, *zdata)
+
+
 def test_ewise_add_vec(vs):
     x, y = vs
     z = Vector.new(x.dtype, x.size())
@@ -70,6 +85,15 @@ def test_ewise_add_mat(ms):
                    [10, -20, -60, -3, -4, 40, -5])
 
 
+def test_ewise_add_empty(ms):
+    x, y = ms
+    # Empty into empty
+    a = Matrix.new(y.dtype, *y.shape)
+    b = Matrix.new(y.dtype, *y.shape)
+    operations.ewise_add(a, BinaryOp.max, b, y)
+    matrix_compare(a, *y.extract_tuples())
+
+
 def test_ewise_mult_vec(vs):
     x, y = vs
     z = Vector.new(x.dtype, x.size())
@@ -84,6 +108,20 @@ def test_ewise_mult_mat(ms):
     matrix_compare(z, [0, 0], [1, 3], [-1, -2])
 
 
+def test_ewise_mult_empty(ms):
+    x, y = ms
+    xdata = x.extract_tuples()
+    # Empty into empty
+    a = Matrix.new(y.dtype, *y.shape)
+    b = Matrix.new(y.dtype, *y.shape)
+    operations.ewise_mult(a, BinaryOp.max, b, y)
+    assert a._obj is None
+
+    # Empty accum into non-empty
+    operations.ewise_mult(x, BinaryOp.plus, b, y, accum=BinaryOp.plus)
+    matrix_compare(x, *xdata)
+
+
 def test_mxm(mm):
     x, y = mm
     z = Matrix.new(x.dtype, x.shape[0], y.shape[1])
@@ -92,6 +130,15 @@ def test_mxm(mm):
                    [0, 1, 2, 2, 4],
                    [0, 0, 0, 4, 3],
                    [20.9, 16.5, 5.5, 70.4, 13.2])
+
+
+def test_mxm_empty(mm):
+    x, y = mm
+    # Empty into empty
+    a = Matrix.new(x.dtype, x.shape[0], y.shape[1])
+    b = Matrix.new(y.dtype, *y.shape)
+    operations.mxm(a, Semiring.plus_times, x, b)
+    assert a._obj is None
 
 
 def test_mxv(vs, mm):
@@ -107,12 +154,32 @@ def test_mxv(vs, mm):
         pytest.xfail("Waiting for lex insert fix")
 
 
+def test_mxv_empty(vs, mm):
+    v, _ = vs
+    _, y = mm
+    # Empty into empty
+    b = Matrix.new(y.dtype, *y.shape)
+    z = Vector.new(v.dtype, y.shape[0])
+    operations.mxv(z, Semiring.plus_times, b, v)
+    assert z._obj is None
+
+
 def test_vxm(vs, mm):
     _, v = vs
     m, _ = mm
     z = Vector.new(m.dtype, m.shape[1])
     operations.vxm(z, Semiring.plus_times, v, m)
     vector_compare(z, [0, 1, 3, 5], [8.8, 11., 1.1, 2.2])
+
+
+def test_vxm_empty(vs, mm):
+    v, _ = vs
+    x, _ = mm
+    # Empty into empty
+    b = Matrix.new(x.dtype, *x.shape)
+    z = Vector.new(v.dtype, x.shape[1])
+    operations.vxm(z, Semiring.plus_times, v, b)
+    assert z._obj is None
 
 
 def test_apply_mat(ms):
@@ -165,6 +232,20 @@ def test_apply_inplace():
                    [.5, .02, .04, .05, .06666666666667])
 
 
+def test_apply_empty(mm):
+    x, _ = mm
+    xdata = x.extract_tuples()
+    # Empty into empty
+    a = Matrix.new(x.dtype, *x.shape)
+    b = Matrix.new(x.dtype, *x.shape)
+    operations.apply(a, UnaryOp.ainv, b)
+    assert a._obj is None
+
+    # Empty accum into non-empty
+    operations.apply(x, BinaryOp.plus, b, right=12, accum=BinaryOp.plus)
+    matrix_compare(x, *xdata)
+
+
 def test_select_vec(vs):
     x, _ = vs
 
@@ -193,11 +274,19 @@ def test_select_mat(mm):
     matrix_compare(z, [0, 0, 0], [1, 3, 5], [1., 5., 7.])
 
 
-def test_empty_select():
-    v = Vector.new(FP32, 16)  # don't build; keep empty
+def test_select_empty(vs):
+    # Empty into empty
+    v = Vector.new(FP32, 16)
     z = Vector.new(FP32, 16)
     operations.select(z, SelectOp.rowle, v, 4)
     assert z._obj is None
+
+    # Empty accum into non-empty
+    z, _ = vs
+    zdata = z.extract_tuples()
+    w = Vector.new(z.dtype, *z.shape)
+    operations.select(z, SelectOp.valuegt, w, 4, accum=BinaryOp.plus)
+    vector_compare(z, *zdata)
 
 
 def test_reduce_rowwise(mm):
@@ -219,6 +308,21 @@ def test_reduce_colwise(mm):
     vector_compare(z, [0, 1, 2, 3, 5], [4.4, 5.5, 6.6, 3.63, 2.2])
 
 
+def test_reduce_to_vector_empty(vs, mm):
+    v, w = vs
+    vdata = v.extract_tuples()
+    x, _ = mm
+    # Empty into empty
+    a = Matrix.new(x.dtype, *x.shape)
+    z = Vector.new(x.dtype, x.shape[0])
+    operations.reduce_to_vector(z, Monoid.plus, a)
+    assert z._obj is None
+
+    # Empty accum into non-empty
+    operations.reduce_to_vector(v, Monoid.plus, a, accum=BinaryOp.plus)
+    vector_compare(v, *vdata)
+
+
 def test_reduce_scalar_mat(mm):
     x, _ = mm
     _, _, xvals = x.extract_tuples()
@@ -237,6 +341,20 @@ def test_reduce_scalar_vec(vs):
     s = Scalar.new(x.dtype)
     operations.reduce_to_scalar(s, Monoid.times, x)
     np_assert_allclose(s.extract_element(), functools.reduce(operator.mul, xvals))
+
+
+def test_reduce_to_scalar_empty():
+    # Empty into empty
+    a = Matrix.new(INT32, 4, 5)
+    z = Scalar.new(INT32)
+    operations.reduce_to_scalar(z, Monoid.plus, a)
+    assert z._obj is None
+
+    # Empty accum into non-empty
+    pytest.xfail("need to implement scalar accumulation")
+    z.set_element(42.0)
+    operations.reduce_to_scalar(z, Monoid.plus, a, accum=BinaryOp.plus)
+    assert z.extract_element() == 42.0
 
 
 def test_extract_vec(vs):
@@ -313,6 +431,20 @@ def test_extract_vec_from_mat(mm):
     vector_compare(z3, [2], [6.6])
 
 
+def test_extract_empty(mm):
+    x, _ = mm
+    xdata = x.extract_tuples()
+    # Empty into empty
+    a = Matrix.new(x.dtype, *x.shape)
+    z = Matrix.new(x.dtype, 2, 4)
+    operations.extract(z, a, [0, 1], [1, 3, 5, 5])
+    assert a._obj is None
+
+    # Empty accum into non-empty
+    operations.extract(x, a, None, None, accum=BinaryOp.plus)
+    matrix_compare(x, *xdata)
+
+
 def test_assign_vec(vs):
     x, y = vs
 
@@ -325,6 +457,11 @@ def test_assign_vec(vs):
     operations.assign(z, x, [1, 3, 13, 10, 2])
     assert z.size() == 16
     vector_compare(z, [3, 10, 13], [10., 30., 20.])
+
+    # Empty input
+    a = Vector.new(x.dtype, 3)
+    operations.assign(z, a, [1, 3, 13])
+    vector_compare(z, [10], [30.])
 
 
 def test_assign_mat(ms):
@@ -406,6 +543,12 @@ def test_assign_vec_to_mat(ms):
                    [1, 3, 0, 1, 3, 4],
                    [-1, -2, -3, -4, 101, -5])
 
+    # Empty input col
+    z5 = x.dup()
+    a = Vector.new(x.dtype, 2)
+    operations.assign(z5, a, [0, 1], 1)
+    matrix_compare(z5, [0, 1, 1], [3, 0, 4], [-2, -3, -5])
+
 
 def test_assign_scalar_to_vec(vs):
     x, _ = vs
@@ -465,3 +608,9 @@ def test_assign_scalar_to_mat(ms):
     # Assign GrB_ALL without mask raises error
     with pytest.raises(exceptions.GrbError, match="dense matrix"):
         operations.assign(x, 99)
+
+    # Empty scalar
+    z5 = x.dup()
+    s = Scalar.new(x.dtype)
+    operations.assign(z5, s, [1], [1, 2, 3, 4])
+    matrix_compare(z5, [0, 0, 1], [1, 3, 0], [-1, -2, -3])
