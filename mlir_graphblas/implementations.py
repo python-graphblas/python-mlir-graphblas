@@ -292,6 +292,47 @@ def _build_dup(sp: SparseTensorBase):
         return compile(module)
 
 
+def flip_layout(m: Union[Matrix, TransposedMatrix]):
+    if m._obj is None:
+        return m
+
+    trans = type(m) is TransposedMatrix
+    if trans:
+        m = m._referenced_matrix
+
+    # Build and compile if needed
+    key = ('flip_layout', *m.get_loop_key())
+    if key not in engine_cache:
+        engine_cache[key] = _build_flip_layout(m)
+
+    # Call the compiled function
+    mem_out = get_sparse_output_pointer()
+    arg_pointers = [m._obj, mem_out]
+    engine_cache[key].invoke('main', *arg_pointers)
+
+    flipped = Matrix(m.dtype, m.shape, mem_out, m._sparsity,
+                     list(reversed(m._ordering)), intermediate_result=True)
+    if trans:
+        return TransposedMatrix.wrap(flipped)
+    return flipped
+
+
+def _build_flip_layout(m: Union[Matrix, TransposedMatrix]):
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            rtt = m.rtt.as_mlir_type()
+            rev_order = tuple(reversed(m.rtt.ordering))
+            rtt_out = m.rtt.copy(ordering=rev_order).as_mlir_type()
+
+            @func.FuncOp.from_py_func(rtt)
+            def main(x):
+                return sparse_tensor.ConvertOp(rtt_out, x)
+            main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+
+        return compile(module)
+
+
 def _build_scalar_binop(op: BinaryOp, left: Scalar, right: Scalar):
     # Both scalars are present
     with ir.Context(), ir.Location.unknown():

@@ -282,8 +282,8 @@ def mxm(out: Matrix,
     #  - colwise x colwise => colwise expanded access pattern
     #  - colwise x rowwise => <illegal>
     if left.is_colwise() and right.is_rowwise():
-        # TODO: handle this by reordering whichever has fewer nvals
-        raise NotImplementedError("The particular iteration pattern (colwise x rowwise) is not yet support for mxm")
+        # Need to flip one of the matrices to make iteration valid
+        right = impl.flip_layout(right)
 
     # TODO: apply the mask during the computation, not at the end
     result = impl.mxm(op, left, right)

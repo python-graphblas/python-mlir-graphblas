@@ -152,12 +152,28 @@ def test_ewise_mult_scalar(ss):
 
 def test_mxm(mm):
     x, y = mm
+    # Create colwise version of x and y
+    xcol = Matrix.new(x.dtype, *x.shape)
+    xcol.build(*x.extract_tuples(), colwise=True)
+    ycol = Matrix.new(y.dtype, *y.shape)
+    ycol.build(*y.extract_tuples(), colwise=True)
+    expected = [0, 1, 2, 2, 4], [0, 0, 0, 4, 3], [20.9, 16.5, 5.5, 70.4, 13.2]
+    # rowwise @ rowwise
     z = Matrix.new(x.dtype, x.shape[0], y.shape[1])
     operations.mxm(z, Semiring.plus_times, x, y)
-    matrix_compare(z,
-                   [0, 1, 2, 2, 4],
-                   [0, 0, 0, 4, 3],
-                   [20.9, 16.5, 5.5, 70.4, 13.2])
+    matrix_compare(z, *expected)
+    # rowwise @ colwise
+    z.clear()
+    operations.mxm(z, Semiring.plus_times, x, ycol)
+    matrix_compare(z, *expected)
+    # colwise @ colwise
+    z.clear()
+    operations.mxm(z, Semiring.plus_times, xcol, ycol)
+    matrix_compare(z, *expected)
+    # colwise @ rowwise
+    z.clear()
+    operations.mxm(z, Semiring.plus_times, xcol, y)
+    matrix_compare(z, *expected)
 
 
 def test_mxm_empty(mm):
