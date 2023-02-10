@@ -16,9 +16,10 @@ from .tensor import SparseTensorBase, SparseTensor, Matrix, Vector, Scalar, Tran
 from .operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiring
 from .compiler import compile, engine_cache
 from . descriptor import Descriptor, NULL as NULL_DESC
-from .utils import get_sparse_output_pointer, get_scalar_output_pointer, pick_and_renumber_indices
+from .utils import (get_sparse_output_pointer, get_scalar_output_pointer,
+                    get_scalar_input_arg, pick_and_renumber_indices)
 from .types import RankedTensorType, BOOL, INT64, FP64
-from .exceptions import GrbIndexOutOfBounds, GrbDimensionMismatch
+from .exceptions import GrbError, GrbIndexOutOfBounds, GrbDimensionMismatch
 
 
 # TODO: vec->matrix broadcasting as builtin param in select_by_mask (rowwise/colwise)
@@ -49,8 +50,7 @@ def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = 
 
     # Convert value mask to structural mask
     if not desc.mask_structure:
-        zero = Scalar.new(mask.dtype)
-        zero.set_element(0)
+        zero = Scalar.new(mask.dtype, 0)
         mask = select(SelectOp.valuene, mask, thunk=zero)
 
     # Build and compile if needed
@@ -292,6 +292,22 @@ def _build_dup(sp: SparseTensorBase):
         return compile(module)
 
 
+def _build_scalar_binop(op: BinaryOp, left: Scalar, right: Scalar):
+    # Both scalars are present
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            dtype = left.dtype.build_mlir_type()
+
+            @func.FuncOp.from_py_func(dtype, dtype)
+            def main(x, y):
+                result = op(x, y)
+                return result
+            main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+
+        return compile(module)
+
+
 def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     assert left.ndims == right.ndims
     assert left.dtype == right.dtype
@@ -301,12 +317,17 @@ def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     if right._obj is None:
         return left
 
-    assert left._sparsity == right._sparsity
-
     rank = left.ndims
     if rank == 0:  # Scalar
-        # TODO: implement this
-        raise NotImplementedError("doesn't yet work for Scalar")
+        key = ('scalar_binop', op.name, left.dtype, right.dtype)
+        if key not in engine_cache:
+            engine_cache[key] = _build_scalar_binop(op, left, right)
+        mem_out = get_scalar_output_pointer(left.dtype)
+        arg_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right), mem_out]
+        engine_cache[key].invoke('main', *arg_pointers)
+        return Scalar(left.dtype, (), left.dtype.np_type(mem_out.contents.value))
+
+    assert left._sparsity == right._sparsity
 
     # Build and compile if needed
     key = ('ewise_add', op.name, *left.get_loop_key(), *right.get_loop_key())
@@ -366,18 +387,22 @@ def _build_ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBa
 def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     assert left.ndims == right.ndims
     assert left.dtype == right.dtype
+    output_dtype = op.get_output_type(left.dtype, right.dtype)
 
-    if left._obj is None:
-        return left
-    if right._obj is None:
-        return right
-
-    assert left._sparsity == right._sparsity
+    if left._obj is None or right._obj is None:
+        return left.baseclass(output_dtype, left.shape)
 
     rank = left.ndims
     if rank == 0:  # Scalar
-        # TODO: implement this
-        raise NotImplementedError("doesn't yet work for Scalar")
+        key = ('scalar_binop', op.name, left.dtype, right.dtype)
+        if key not in engine_cache:
+            engine_cache[key] = _build_scalar_binop(op, left, right)
+        mem_out = get_scalar_output_pointer(output_dtype)
+        arg_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right), mem_out]
+        engine_cache[key].invoke('main', *arg_pointers)
+        return Scalar(output_dtype, (), output_dtype.np_type(mem_out.contents.value))
+
+    assert left._sparsity == right._sparsity
 
     # Build and compile if needed
     key = ('ewise_mult', op.name, *left.get_loop_key(), *right.get_loop_key())
@@ -388,7 +413,7 @@ def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return left.baseclass(op.get_output_type(left.dtype, right.dtype), left.shape, mem_out,
+    return left.baseclass(output_dtype, left.shape, mem_out,
                           left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
@@ -671,11 +696,6 @@ def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
           right: Optional[Scalar] = None,
           thunk: Optional[Scalar] = None,
           inplace: bool = False):
-    rank = sp.ndims
-    if rank == 0:  # Scalar
-        # TODO: implement this
-        raise NotImplementedError("doesn't yet work for Scalar")
-
     # Find output dtype
     optype = type(op)
     if optype is UnaryOp:
@@ -692,6 +712,25 @@ def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
 
     if sp._obj is None:
         return sp.baseclass(output_dtype, sp.shape)
+
+    rank = sp.ndims
+    if rank == 0:  # Scalar
+        if optype is UnaryOp:
+            key = ('scalar_apply_unary', op.name, sp.dtype)
+        elif optype is BinaryOp:
+            if left is not None:
+                key = ('scalar_apply_bind_first', op.name, sp.dtype, left._obj)
+            else:
+                key = ('scalar_apply_bind_second', op.name, sp.dtype, right._obj)
+        else:
+            raise GrbError("apply scalar not supported for IndexUnaryOp")
+
+        if key not in engine_cache:
+            engine_cache[key] = _build_scalar_apply(op, sp, left, right)
+        mem_out = get_scalar_output_pointer(output_dtype)
+        arg_pointers = [get_scalar_input_arg(sp), mem_out]
+        engine_cache[key].invoke('main', *arg_pointers)
+        return Scalar.new(output_dtype, mem_out.contents.value)
 
     # Build and compile if needed
     # Note that Scalars are included in the key because they are inlined in the compiled code
@@ -719,6 +758,33 @@ def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
     engine_cache[key].invoke('main', *arg_pointers)
     return sp.baseclass(output_dtype, sp.shape, mem_out,
                         sp._sparsity, sp.perceived_ordering, intermediate_result=True)
+
+
+def _build_scalar_apply(op: Union[UnaryOp, BinaryOp],
+                        sp: SparseTensorBase,
+                        left: Optional[Scalar],
+                        right: Optional[Scalar]):
+    optype = type(op)
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            dtype = sp.dtype.build_mlir_type()
+
+            @func.FuncOp.from_py_func(dtype)
+            def main(x):
+                if optype is BinaryOp:
+                    if left is not None:
+                        left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left.extract_element())
+                        result = op(left_val, x)
+                    else:
+                        right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right.extract_element())
+                        result = op(x, right_val)
+                else:
+                    result = op(x)
+                return result
+            main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+
+        return compile(module)
 
 
 def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
@@ -768,16 +834,16 @@ def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
                         arg0,  = present.arguments
                         if optype is IndexUnaryOp:
                             if op.thunk_as_index:
-                                thunk_val = arith.ConstantOp(index, thunk._obj.item())
+                                thunk_val = arith.ConstantOp(index, thunk.extract_element())
                             else:
-                                thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk._obj.item())
+                                thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk.extract_element())
                             val = op(arg0, rowidx, colidx, thunk_val)
                         elif optype is BinaryOp:
                             if left is not None:
-                                left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left._obj.item())
+                                left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left.extract_element())
                                 val = op(left_val, arg0)
                             else:
-                                right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right._obj.item())
+                                right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right.extract_element())
                                 val = op(arg0, right_val)
                         else:
                             val = op(arg0)
@@ -818,10 +884,10 @@ def _build_apply_inplace(op: Union[UnaryOp, BinaryOp],
                     val = memref.LoadOp(vals, [x])
                     if optype is BinaryOp:
                         if left is not None:
-                            left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left._obj.item())
+                            left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left.extract_element())
                             result = op(left_val, val)
                         else:
-                            right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right._obj.item())
+                            right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right.extract_element())
                             result = op(val, right_val)
                     else:
                         result = op(val)
@@ -833,14 +899,23 @@ def _build_apply_inplace(op: Union[UnaryOp, BinaryOp],
 
 
 def select(op: SelectOp, sp: SparseTensor, thunk: Scalar):
-    rank = sp.ndims
-    if rank == 0:  # Scalar
-        # TODO: implement this
-        raise NotImplementedError("doesn't yet work for Scalar")
-
     # Handle case of empty tensor
     if sp._obj is None:
         return sp.__class__(sp.dtype, sp.shape)
+
+    rank = sp.ndims
+    if rank == 0:  # Scalar
+        key = ('scalar_select', op.name, sp.dtype, thunk._obj)
+        if key not in engine_cache:
+            engine_cache[key] = _build_scalar_select(op, sp, thunk)
+        mem_out = get_scalar_output_pointer(sp.dtype)
+        arg_pointers = [get_scalar_input_arg(sp), mem_out]
+        engine_cache[key].invoke('main', *arg_pointers)
+        # Invocation returns True/False for whether to keep value
+        if mem_out.contents.value:
+            return sp.dup()
+        else:
+            return Scalar.new(sp.dtype)
 
     # Build and compile if needed
     # Note that thunk is included in the key because it is inlined in the compiled code
@@ -854,6 +929,27 @@ def select(op: SelectOp, sp: SparseTensor, thunk: Scalar):
     engine_cache[key].invoke('main', *arg_pointers)
     return sp.baseclass(sp.dtype, sp.shape, mem_out,
                             sp._sparsity, sp.perceived_ordering, intermediate_result=True)
+
+
+def _build_scalar_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            index = ir.IndexType.get()
+            dtype = sp.dtype.build_mlir_type()
+
+            @func.FuncOp.from_py_func(dtype)
+            def main(x):
+                c0 = arith.ConstantOp(index, 0)
+                if op.thunk_as_index:
+                    thunk_val = arith.ConstantOp(index, thunk.extract_element())
+                else:
+                    thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk.extract_element())
+                cmp = op(x, c0, c0, thunk_val)
+                return cmp
+            main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+
+        return compile(module)
 
 
 def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
@@ -894,9 +990,9 @@ def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
                     with ir.InsertionPoint(region):
                         arg0, = region.arguments
                         if op.thunk_as_index:
-                            thunk_val = arith.ConstantOp(index, thunk._obj.item())
+                            thunk_val = arith.ConstantOp(index, thunk.extract_element())
                         else:
-                            thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk._obj.item())
+                            thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk.extract_element())
                         cmp = op(arg0, rowidx, colidx, thunk_val)
                         sparse_tensor.YieldOp(result=cmp)
                     linalg.YieldOp([res])
@@ -977,9 +1073,7 @@ def reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
     mem_out = get_scalar_output_pointer(sp.dtype)
     arg_pointers = [sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    s = Scalar.new(sp.dtype)
-    s.set_element(mem_out.contents.value)
-    return s
+    return Scalar.new(sp.dtype, mem_out.contents.value)
 
 
 def _build_reduce_to_scalar(op: Monoid, sp: SparseTensorBase):

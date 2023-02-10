@@ -62,7 +62,7 @@ def update(output: SparseObject,
         if accum is None or output._obj is None:
             output.set_element(tensor.extract_element())
         else:
-            raise NotImplementedError("scalar accumulation not yet implemented")
+            output._obj = impl.ewise_add(accum, output, tensor)._obj
         return
 
     if not isinstance(output, SparseTensor):
@@ -173,7 +173,7 @@ def ewise_add(out: SparseTensor,
         raise TypeError(f"op must be BinaryOp, Monoid, or Semiring")
 
     # Verify dtypes
-    if op.output is not None:
+    if op.output is not None and type(op.output) is not int:
         raise GrbDomainMismatch("op must return same type as inputs with ewise_add")
     if left.dtype != right.dtype:
         raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")

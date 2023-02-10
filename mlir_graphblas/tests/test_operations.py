@@ -11,6 +11,13 @@ from .utils import vector_compare, matrix_compare
 
 
 @pytest.fixture
+def ss():
+    x = Scalar.new(INT64, 42)
+    y = Scalar.new(INT64)
+    return x, y
+
+
+@pytest.fixture
 def vs():
     x = Vector.new(FP32, 5)
     x.build([1, 2, 3], [10., 20., 30.])
@@ -94,6 +101,15 @@ def test_ewise_add_empty(ms):
     matrix_compare(a, *y.extract_tuples())
 
 
+def test_ewise_add_scalar(ss):
+    x, y = ss
+    z = Scalar.new(x.dtype)
+    operations.ewise_add(z, BinaryOp.times, x, y)
+    assert z._obj == x._obj
+    operations.ewise_add(z, BinaryOp.times, x, x)
+    assert z.extract_element() == x.extract_element() ** 2
+
+
 def test_ewise_mult_vec(vs):
     x, y = vs
     z = Vector.new(x.dtype, x.size())
@@ -120,6 +136,18 @@ def test_ewise_mult_empty(ms):
     # Empty accum into non-empty
     operations.ewise_mult(x, BinaryOp.plus, b, y, accum=BinaryOp.plus)
     matrix_compare(x, *xdata)
+
+
+def test_ewise_mult_scalar(ss):
+    x, y = ss
+    z = Scalar.new(x.dtype)
+    operations.ewise_mult(z, BinaryOp.times, x, y)
+    assert z.nvals() == 0
+    operations.ewise_mult(z, BinaryOp.times, x, x)
+    assert z.extract_element() == x.extract_element() ** 2
+    z2 = Scalar.new(BOOL)
+    operations.ewise_mult(z2, BinaryOp.gt, x, x)
+    assert z2.nvals() == 1 and not z2.extract_element()
 
 
 def test_mxm(mm):
@@ -246,6 +274,20 @@ def test_apply_empty(mm):
     matrix_compare(x, *xdata)
 
 
+def test_apply_scalar(ss):
+    x, y = ss
+    z = Scalar.new(x.dtype)
+    operations.apply(z, UnaryOp.ainv, x)
+    assert z.extract_element() == -x.extract_element()
+    operations.apply(z, UnaryOp.ainv, y)
+    assert z.nvals() == 0
+    operations.apply(z, BinaryOp.minus, x, right=64)
+    assert z.extract_element() == x.extract_element() - 64
+
+    with pytest.raises(exceptions.GrbError):
+        operations.apply(z, IndexUnaryOp.rowindex, x, thunk=0)
+
+
 def test_select_vec(vs):
     x, _ = vs
 
@@ -287,6 +329,20 @@ def test_select_empty(vs):
     w = Vector.new(z.dtype, *z.shape)
     operations.select(z, SelectOp.valuegt, w, 4, accum=BinaryOp.plus)
     vector_compare(z, *zdata)
+
+
+def test_select_scalar(ss):
+    x, y = ss
+    z = Scalar.new(x.dtype)
+    operations.select(z, SelectOp.valuegt, x, 1004)
+    assert z.nvals() == 0
+    operations.select(z, SelectOp.valuegt, x, 4)
+    assert z.nvals() == 1
+    assert z.extract_element() == x.extract_element()
+    # Scalars are treated as having row=0, col=0 for index purposes
+    operations.select(z, SelectOp.rowle, x, 0)
+    assert z.nvals() == 1
+    assert z.extract_element() == x.extract_element()
 
 
 def test_reduce_rowwise(mm):
@@ -351,7 +407,6 @@ def test_reduce_to_scalar_empty():
     assert z._obj is None
 
     # Empty accum into non-empty
-    pytest.xfail("need to implement scalar accumulation")
     z.set_element(42.0)
     operations.reduce_to_scalar(z, Monoid.plus, a, accum=BinaryOp.plus)
     assert z.extract_element() == 42.0

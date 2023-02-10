@@ -2,7 +2,7 @@ import ctypes
 import numpy as np
 
 from .utils import c_lib, LLVMPTR
-from .types import RankedTensorType
+from .types import RankedTensorType, BOOL
 from mlir.dialects.sparse_tensor import DimLevelType
 from .exceptions import (
     GrbNullPointer, GrbInvalidValue, GrbInvalidIndex, GrbDomainMismatch,
@@ -218,15 +218,17 @@ class Scalar(SparseObject):
         return f'Scalar<{self.dtype.gb_name}, value={self._obj}>'
 
     @classmethod
-    def new(cls, dtype):
-        return cls(dtype, ())
+    def new(cls, dtype, value=None):
+        s = cls(dtype, ())
+        s.set_element(value)
+        return s
 
     def clear(self):
         self._obj = None
 
     def dup(self):
         s = Scalar.new(self.dtype)
-        s.set_element(self._obj)
+        s._obj = self._obj
         return s
 
     def nvals(self):
@@ -235,12 +237,17 @@ class Scalar(SparseObject):
         return 1
 
     def set_element(self, val):
-        self._obj = val if val is None else self.dtype.np_type(val)
+        if val is not None:
+            if self.dtype == BOOL:
+                val = val is True or val == 1
+            else:
+                val = self.dtype.np_type(val)
+        self._obj = val
 
     def extract_element(self):
-        if self._obj is None:
-            return None
-        return self._obj.item()
+        if self._obj is not None and self.dtype != BOOL:
+            return self._obj.item()
+        return self._obj
 
 
 class Vector(SparseTensor):

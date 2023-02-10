@@ -24,6 +24,10 @@ def get_scalar_output_pointer(dtype):
     return ctypes.pointer(dtype.c_type(0))
 
 
+def get_scalar_input_arg(s):
+    return ctypes.byref(s.dtype.c_type(s._obj))
+
+
 def ensure_scalar_of_type(obj, dtype):
     from .tensor import Scalar
 
@@ -34,9 +38,7 @@ def ensure_scalar_of_type(obj, dtype):
     if type(obj) not in {bool, int, float}:
         raise TypeError(f"Expected Scalar, bool, int, or float, but found {type(obj)}")
     # Create a Scalar with correct dtype
-    s = Scalar.new(dtype)
-    s.set_element(obj)
-    return s
+    return Scalar.new(dtype, obj)
 
 
 def ensure_unique(indices, name=None):
