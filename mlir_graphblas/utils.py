@@ -2,6 +2,7 @@ import ctypes
 import numpy as np
 from enum import Enum
 from mlir import ir
+from mlir.dialects.sparse_tensor import DimLevelType
 from .exceptions import (
     GrbNullPointer, GrbInvalidValue, GrbInvalidIndex, GrbDomainMismatch,
     GrbDimensionMismatch, GrbOutputNotEmpty, GrbIndexOutOfBounds, GrbEmptyObject
@@ -47,6 +48,34 @@ def ensure_unique(indices, name=None):
         unique, counts = np.unique(indices, return_counts=True)
         name_str = f" in {name}" if name is not None else ""
         raise ValueError(f"Found duplicate indices{name_str}: {unique[counts > 1]}")
+
+
+def determine_sparsity(left, right, union=False):
+    """
+    Returns the sparsity appropriate for the two inputs based on `union`.
+    If union == True, finds a sparsity that anticipates more values than either input.
+    If union == False, finds a sparsity that anticipates the same or fewer values than either input.
+    """
+    assert left.ndims == right.ndims
+    assert left.ndims > 0, "Not allowed for Scalars"
+    if left._sparsity == right._sparsity:
+        return left._sparsity
+
+    dense = DimLevelType.dense
+    comp = DimLevelType.compressed
+
+    if left.ndims == 1:  # Vector
+        levels = ([comp], [dense])
+    else:  # Matrix
+        levels = ([comp, comp], [comp, dense], [dense, comp], [dense, dense])
+
+    if union:
+        levels = reversed(levels)
+    for lvl in levels:
+        if left._sparsity == lvl or right._sparsity == lvl:
+            return lvl
+
+    raise Exception("something went wrong finding the sparsity")
 
 
 def pick_and_renumber_indices(selected, indices, *related):

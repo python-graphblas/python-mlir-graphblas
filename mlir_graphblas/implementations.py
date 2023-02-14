@@ -17,7 +17,7 @@ from .operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiri
 from .compiler import compile, engine_cache
 from . descriptor import Descriptor, NULL as NULL_DESC
 from .utils import (get_sparse_output_pointer, get_scalar_output_pointer,
-                    get_scalar_input_arg, pick_and_renumber_indices)
+                    get_scalar_input_arg, pick_and_renumber_indices, determine_sparsity)
 from .types import RankedTensorType, BOOL, INT64, FP64
 from .exceptions import GrbError, GrbIndexOutOfBounds, GrbDimensionMismatch
 
@@ -34,7 +34,6 @@ def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = 
     in `sp` correspond to missing or "falsy" elements in the mask.
     """
     assert mask.ndims == sp.ndims
-    assert mask._sparsity == sp._sparsity
     if mask.shape != sp.shape:
         raise GrbDimensionMismatch(f"Mask shape mismatch: {mask.shape} != {sp.shape}")
 
@@ -62,7 +61,7 @@ def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = 
     mem_out = get_sparse_output_pointer()
     arg_pointers = [mask._obj, sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return mask.baseclass(sp.dtype, mask.shape, mem_out, mask._sparsity,
+    return mask.baseclass(sp.dtype, mask.shape, mem_out, determine_sparsity(mask, sp),
                           mask.perceived_ordering, intermediate_result=True)
 
 
@@ -80,7 +79,8 @@ def _build_select_by_mask(mask: SparseTensor, sp: SparseTensorBase, complement: 
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt_sp = sp.rtt.as_mlir_type()
             rtt_mask = mask.rtt.as_mlir_type()
-            rtt_out = mask.rtt.copy(dtype=sp.dtype).as_mlir_type()
+            rtt_out = mask.rtt.copy(dtype=sp.dtype,
+                                    sparsity=determine_sparsity(mask, sp)).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt_mask, rtt_sp)
             def main(msk, x):
@@ -368,8 +368,6 @@ def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
         engine_cache[key].invoke('main', *arg_pointers)
         return Scalar(left.dtype, (), left.dtype.np_type(mem_out.contents.value))
 
-    assert left._sparsity == right._sparsity
-
     # Build and compile if needed
     key = ('ewise_add', op.name, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
@@ -380,7 +378,8 @@ def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
     return left.baseclass(op.get_output_type(left.dtype, right.dtype), left.shape, mem_out,
-                          left._sparsity, left.perceived_ordering, intermediate_result=True)
+                          determine_sparsity(left, right, union=True), left.perceived_ordering,
+                          intermediate_result=True)
 
 
 def _build_ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
@@ -395,7 +394,8 @@ def _build_ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBa
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = left.rtt.copy(ordering=left.perceived_ordering).as_mlir_type()
+            rtt_out = left.rtt.copy(ordering=left.perceived_ordering,
+                                    sparsity=determine_sparsity(left, right, union=True)).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt_left, rtt_right)
             def main(x, y):
@@ -443,8 +443,6 @@ def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
         engine_cache[key].invoke('main', *arg_pointers)
         return Scalar(output_dtype, (), output_dtype.np_type(mem_out.contents.value))
 
-    assert left._sparsity == right._sparsity
-
     # Build and compile if needed
     key = ('ewise_mult', op.name, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
@@ -455,7 +453,8 @@ def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
     return left.baseclass(output_dtype, left.shape, mem_out,
-                          left._sparsity, left.perceived_ordering, intermediate_result=True)
+                          determine_sparsity(left, right), left.perceived_ordering,
+                          intermediate_result=True)
 
 
 def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
@@ -472,7 +471,9 @@ def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorB
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = left.rtt.copy(dtype=op_result_dtype, ordering=left.perceived_ordering).as_mlir_type()
+            rtt_out = RankedTensorType(dtype=op_result_dtype,
+                                       sparsity=determine_sparsity(left, right),
+                                       ordering=left.perceived_ordering).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt_left, rtt_right)
             def main(x, y):
@@ -511,8 +512,6 @@ def mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix
     if left._obj is None or right._obj is None:
         return Matrix.new(optype, left.shape[0], right.shape[1])
 
-    assert left._sparsity == right._sparsity
-
     # Build and compile if needed
     key = ('mxm', op.name, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
@@ -523,7 +522,7 @@ def mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
     return Matrix(optype, [left.shape[0], right.shape[1]], mem_out,
-                  left._sparsity, left.perceived_ordering, intermediate_result=True)
+                  determine_sparsity(left, right), left.perceived_ordering, intermediate_result=True)
 
 
 def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
@@ -539,7 +538,9 @@ def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union
             perm_out = ir.AffineMap.get(3, 0, [ir.AffineDimExpr.get(0), ir.AffineDimExpr.get(1)])
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = left.rtt.copy(dtype=op_result_dtype, ordering=left.perceived_ordering).as_mlir_type()
+            rtt_out = RankedTensorType(dtype=op_result_dtype,
+                                       sparsity=determine_sparsity(left, right),
+                                       ordering=left.perceived_ordering).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt_left, rtt_right)
             def main(x, y):
@@ -1223,18 +1224,18 @@ def assign(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_siz
             v = Vector.new(tensor.dtype, row_size)
             # Map idx to output indices
             idx = np.array(row_indices, dtype=np.uint64)[idx]
-            v.build(idx, vals)
+            v.build(idx, vals, sparsity=tensor._sparsity)
             return v
         # Assign Vector as row or column of Matrix
         m = Matrix.new(tensor.dtype, row_size, col_size)
         if type(row_indices) is int:
             # Map idx to output cols
             colidx = idx if col_indices is None else np.array(col_indices, dtype=np.uint64)[idx]
-            m.build([row_indices]*len(vals), colidx, vals)
+            m.build([row_indices]*len(vals), colidx, vals, sparsity=["compressed", "compressed"])
         if type(col_indices) is int:
             # Map idx to output rows
             rowidx = idx if row_indices is None else np.array(row_indices, dtype=np.uint64)[idx]
-            m.build(rowidx, [col_indices]*len(vals), vals)
+            m.build(rowidx, [col_indices]*len(vals), vals, sparsity=["compressed", "compressed"])
         return m
 
     # Matrix input
@@ -1249,5 +1250,5 @@ def assign(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_siz
     if col_indices is not None:
         colidx = np.array(col_indices, dtype=np.uint64)[colidx]
     m = Matrix.new(tensor.dtype, row_size, col_size)
-    m.build(rowidx, colidx, vals)
+    m.build(rowidx, colidx, vals, sparsity=["compressed", "compressed"])
     return m

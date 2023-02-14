@@ -11,7 +11,6 @@ from . import implementations as impl
 from .utils import ensure_scalar_of_type, ensure_unique
 from .types import BOOL, INT64
 from .operators import BinaryOp, SelectOp
-from mlir.dialects.sparse_tensor import DimLevelType
 
 
 __all__ = ["transpose", "ewise_add", "ewise_mult", "mxm", "apply", "select",
