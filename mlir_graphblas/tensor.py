@@ -74,7 +74,7 @@ class SparseTensorBase(SparseObject):
         f"""Returns a copy of the {self.baseclass}"""
         from . import implementations as impl
 
-        return impl.dup(self, intermediate=False)
+        return impl.dup(self.dtype, self, intermediate=False)
 
     @property
     def rtt(self):
@@ -227,6 +227,7 @@ class Scalar(SparseObject):
         self._obj = None
 
     def dup(self):
+        # Don't pass value to `new` to avoid `set_element` logic
         s = Scalar.new(self.dtype)
         s._obj = self._obj
         return s

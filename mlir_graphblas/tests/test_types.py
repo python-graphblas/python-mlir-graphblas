@@ -1,6 +1,9 @@
 import pytest
 import numpy as np
-from ..types import DType, BOOL, INT8, INT16, INT32, INT64, FP32, FP64, RankedTensorType
+from ..types import (
+    DType, BOOL, INT8, INT16, INT32, INT64, FP32, FP64, RankedTensorType,
+    find_common_dtype
+)
 from mlir.dialects.sparse_tensor import DimLevelType
 from mlir import ir
 
@@ -53,3 +56,15 @@ def test_rtt():
         'dimOrdering = affine_map<(d0, d1) -> (d1, d0)> '
         '}>>'
     )
+
+
+def test_find_common_dtype():
+    assert find_common_dtype(FP64, FP64) == FP64
+    assert find_common_dtype(FP64, FP32) == FP64
+    assert find_common_dtype(FP64, INT8) == FP64
+    assert find_common_dtype(INT8, FP64) == FP64
+    assert find_common_dtype(INT16, FP32) == FP32
+    assert find_common_dtype(INT16, INT16) == INT16
+    assert find_common_dtype(INT8, INT64) == INT64
+    assert find_common_dtype(INT32, BOOL) == INT32
+    assert find_common_dtype(BOOL, BOOL) == BOOL

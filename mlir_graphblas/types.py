@@ -32,6 +32,9 @@ class DType:
     def is_int(self):
         return self.mlir_name[0] == 'i'
 
+    def bitwidth(self):
+        return int(self.mlir_name[1:])
+
     def build_max(self):
         if self.is_float():
             return arith.ConstantOp(self.build_mlir_type(), math.inf)
@@ -109,6 +112,7 @@ INT64 = DType._register('INT64', 'i64', np.int64, lambda: ir.IntegerType.get_sig
 FP32 = DType._register('FP32', 'f32', np.float32, ir.F32Type.get)
 FP64 = DType._register('FP64', 'f64', np.float64, ir.F64Type.get)
 # TODO: should we handle complex types?
+# TODO: should we handle unsigned ints? If so, utility functions need to change.
 
 
 class RankedTensorType:
@@ -138,3 +142,36 @@ class RankedTensorType:
         if ordering is None:
             ordering = self.ordering
         return RankedTensorType(dtype, sparsity, ordering)
+
+
+def find_common_dtype(left: DType, right: DType):
+    """
+    Follow C convention for unifying types
+    """
+    if left == right:
+        return left
+
+    bits = max(left.bitwidth(), right.bitwidth())
+    # There are no unsigned types; if that changes, this will need to change as well
+    if left.is_float() or right.is_float():
+        return DType.from_gb(f"FP{bits}")
+    return DType.from_gb(f"INT{bits}")
+
+
+def cast(val, intype: DType, outtype: DType):
+    if intype == outtype:
+        return val
+
+    out_mlir = outtype.build_mlir_type()
+    if outtype.is_float():
+        if intype.is_int():
+            return arith.SIToFPOp(out_mlir, val)
+        if intype.bitwidth() < outtype.bitwidth():
+            return arith.ExtFOp(out_mlir, val)
+        return arith.TruncFOp(out_mlir, val)
+    # Output is int
+    if intype.is_float():
+        return arith.FPToSIOp(out_mlir, val)
+    if intype.bitwidth() < outtype.bitwidth():
+        return arith.ExtSIOp(out_mlir, val)
+    return arith.TruncIOp(out_mlir, val)

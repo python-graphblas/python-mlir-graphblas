@@ -18,7 +18,7 @@ from .compiler import compile, engine_cache
 from . descriptor import Descriptor, NULL as NULL_DESC
 from .utils import (get_sparse_output_pointer, get_scalar_output_pointer,
                     get_scalar_input_arg, pick_and_renumber_indices, determine_sparsity)
-from .types import RankedTensorType, BOOL, INT64, FP64
+from .types import DType, RankedTensorType, BOOL, INT64, FP64, cast
 from .exceptions import GrbError, GrbIndexOutOfBounds, GrbDimensionMismatch
 
 
@@ -50,7 +50,7 @@ def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = 
     # Convert value mask to structural mask
     if not desc.mask_structure:
         zero = Scalar.new(mask.dtype, 0)
-        mask = select(SelectOp.valuene, mask, thunk=zero)
+        mask = select(mask.dtype, SelectOp.valuene, mask, thunk=zero)
 
     # Build and compile if needed
     key = ('select_by_mask', *sp.get_loop_key(), *mask.get_loop_key(), desc.mask_complement)
@@ -134,7 +134,7 @@ def select_by_indices(sp: SparseTensorBase,
         if row_indices is None:
             if complement:
                 return Vector.new(sp.dtype, *sp.shape)
-            return dup(sp)
+            return dup(sp.dtype, sp)
 
         idx, vals = sp.extract_tuples()
         row_indices = np.array(row_indices, dtype=np.uint64)
@@ -147,7 +147,7 @@ def select_by_indices(sp: SparseTensorBase,
     if row_indices is None and col_indices is None:
         if complement:
             return Matrix.new(sp.dtype, *sp.shape)
-        return dup(sp)
+        return dup(sp.dtype, sp)
 
     rowidx, colidx, vals = sp.extract_tuples()
     if row_indices is not None:
@@ -241,34 +241,39 @@ def _build_nvals(sp: SparseTensorBase):
         return compile(module)
 
 
-def dup(sp: SparseTensorBase, intermediate: bool = True):
+def dup(out_type: DType, sp: SparseTensorBase, intermediate: bool = True):
     if sp._obj is None:
-        return sp.baseclass(sp.dtype, sp.shape, intermediate_result=intermediate)
+        return sp.baseclass(out_type, sp.shape, intermediate_result=intermediate)
+
+    if sp.ndims == 0:  # Scalar
+        return Scalar.new(out_type, sp._obj)
 
     # Build and compile if needed
-    key = ('dup', *sp.get_loop_key())
+    key = ('dup', out_type, *sp.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_dup(sp)
+        engine_cache[key] = _build_dup(out_type, sp)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
     arg_pointers = [sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return sp.baseclass(sp.dtype, sp.shape, mem_out, sp._sparsity,
+    return sp.baseclass(out_type, sp.shape, mem_out, sp._sparsity,
                         sp.perceived_ordering, intermediate_result=intermediate)
 
 
-def _build_dup(sp: SparseTensorBase):
+def _build_dup(out_type: DType, sp: SparseTensorBase):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             rank = sp.ndims
             index = ir.IndexType.get()
             dtype = sp.dtype.build_mlir_type()
+            dtype_out = out_type.build_mlir_type()
             perm = ir.AffineMap.get_permutation(sp.permutation)
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt = sp.rtt.as_mlir_type()
-            rtt_out = sp.rtt.copy(ordering=sp.perceived_ordering).as_mlir_type()
+            rtt_out = sp.rtt.copy(dtype=out_type,
+                                  ordering=sp.perceived_ordering).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt)
             def main(x):
@@ -282,10 +287,11 @@ def _build_dup(sp: SparseTensorBase):
                     ir.ArrayAttr.get([ir.AffineMapAttr.get(p) for p in (perm, perm_out)]),
                     ir.ArrayAttr.get([ir.Attribute.parse('#linalg.iterator_type<parallel>')]*rank)
                 )
-                block = generic_op.regions[0].blocks.append(dtype, dtype)
+                block = generic_op.regions[0].blocks.append(dtype, dtype_out)
                 with ir.InsertionPoint(block):
                     a, _ = block.arguments
-                    linalg.YieldOp([a])
+                    result = cast(a, sp.dtype, out_type)
+                    linalg.YieldOp([result])
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
@@ -333,69 +339,77 @@ def _build_flip_layout(m: Union[Matrix, TransposedMatrix]):
         return compile(module)
 
 
-def _build_scalar_binop(op: BinaryOp, left: Scalar, right: Scalar):
-    # Both scalars are present
+def _build_scalar_binop(out_type: DType, op: BinaryOp, left: Scalar, right: Scalar):
+    # Both scalars are non-empty
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
-            dtype = left.dtype.build_mlir_type()
+            dtype_left = left.dtype.build_mlir_type()
+            dtype_right = right.dtype.build_mlir_type()
 
-            @func.FuncOp.from_py_func(dtype, dtype)
+            @func.FuncOp.from_py_func(dtype_left, dtype_right)
             def main(x, y):
-                result = op(x, y)
+                result = op(out_type, x, y)
                 return result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
         return compile(module)
 
 
-def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
+def ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     assert left.ndims == right.ndims
     assert left.dtype == right.dtype
 
     if left._obj is None:
-        return right
+        if right.dtype == out_type:
+            return right
+        return dup(out_type, right)
     if right._obj is None:
-        return left
+        if left.dtype == out_type:
+            return left
+        return dup(out_type, left)
 
     rank = left.ndims
     if rank == 0:  # Scalar
-        key = ('scalar_binop', op.name, left.dtype, right.dtype)
+        key = ('scalar_binop', op.name, out_type, left.dtype, right.dtype)
         if key not in engine_cache:
-            engine_cache[key] = _build_scalar_binop(op, left, right)
+            engine_cache[key] = _build_scalar_binop(out_type, op, left, right)
         mem_out = get_scalar_output_pointer(left.dtype)
         arg_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right), mem_out]
         engine_cache[key].invoke('main', *arg_pointers)
-        return Scalar(left.dtype, (), left.dtype.np_type(mem_out.contents.value))
+        return Scalar(out_type, (), out_type.np_type(mem_out.contents.value))
 
     # Build and compile if needed
-    key = ('ewise_add', op.name, *left.get_loop_key(), *right.get_loop_key())
+    key = ('ewise_add', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_ewise_add(op, left, right)
+        engine_cache[key] = _build_ewise_add(out_type, op, left, right)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return left.baseclass(op.get_output_type(left.dtype, right.dtype), left.shape, mem_out,
+    return left.baseclass(out_type, left.shape, mem_out,
                           determine_sparsity(left, right, union=True), left.perceived_ordering,
                           intermediate_result=True)
 
 
-def _build_ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
+def _build_ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             rank = left.ndims
             index = ir.IndexType.get()
-            dtype = left.dtype.build_mlir_type()
+            dtype_left = left.dtype.build_mlir_type()
+            dtype_right = right.dtype.build_mlir_type()
+            dtype_out = out_type.build_mlir_type()
             perm_left = ir.AffineMap.get_permutation(left.permutation)
             perm_right = ir.AffineMap.get_permutation(right.permutation)
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = left.rtt.copy(ordering=left.perceived_ordering,
-                                    sparsity=determine_sparsity(left, right, union=True)).as_mlir_type()
+            rtt_out = RankedTensorType(dtype=out_type,
+                                       sparsity=determine_sparsity(left, right, union=True),
+                                       ordering=left.perceived_ordering).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt_left, rtt_right)
             def main(x, y):
@@ -409,15 +423,25 @@ def _build_ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBa
                     ir.ArrayAttr.get([ir.AffineMapAttr.get(p) for p in (perm_left, perm_right, perm_out)]),
                     ir.ArrayAttr.get([ir.Attribute.parse('#linalg.iterator_type<parallel>')]*rank)
                 )
-                block = generic_op.regions[0].blocks.append(dtype, dtype, dtype)
+                block = generic_op.regions[0].blocks.append(dtype_left, dtype_right, dtype_out)
                 with ir.InsertionPoint(block):
                     a, b, o = block.arguments
-                    res = sparse_tensor.BinaryOp(dtype, a, b, left_identity=True, right_identity=True)
-                    overlap = res.regions[0].blocks.append(dtype, dtype)
+                    res = sparse_tensor.BinaryOp(dtype_out, a, b)
+                    overlap = res.regions[0].blocks.append(dtype_left, dtype_right)
                     with ir.InsertionPoint(overlap):
                         arg0, arg1 = overlap.arguments
-                        overlap_res = op(arg0, arg1)
+                        overlap_res = op(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=overlap_res)
+                    left_region = res.regions[1].blocks.append(dtype_left)
+                    with ir.InsertionPoint(left_region):
+                        arg0, = left_region.arguments
+                        left_res = cast(arg0, left.dtype, out_type)
+                        sparse_tensor.YieldOp(result=left_res)
+                    right_region = res.regions[2].blocks.append(dtype_right)
+                    with ir.InsertionPoint(right_region):
+                        arg0, = right_region.arguments
+                        right_res = cast(arg0, right.dtype, out_type)
+                        sparse_tensor.YieldOp(result=right_res)
                     linalg.YieldOp([res])
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -425,53 +449,51 @@ def _build_ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBa
         return compile(module)
 
 
-def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
+def ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     assert left.ndims == right.ndims
-    assert left.dtype == right.dtype
-    output_dtype = op.get_output_type(left.dtype, right.dtype)
 
     if left._obj is None or right._obj is None:
-        return left.baseclass(output_dtype, left.shape)
+        return left.baseclass(out_type, left.shape)
 
     rank = left.ndims
     if rank == 0:  # Scalar
-        key = ('scalar_binop', op.name, left.dtype, right.dtype)
+        key = ('scalar_binop', op.name, out_type, left.dtype, right.dtype)
         if key not in engine_cache:
-            engine_cache[key] = _build_scalar_binop(op, left, right)
-        mem_out = get_scalar_output_pointer(output_dtype)
+            engine_cache[key] = _build_scalar_binop(out_type, op, left, right)
+        mem_out = get_scalar_output_pointer(out_type)
         arg_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right), mem_out]
         engine_cache[key].invoke('main', *arg_pointers)
-        return Scalar(output_dtype, (), output_dtype.np_type(mem_out.contents.value))
+        return Scalar(out_type, (), out_type.np_type(mem_out.contents.value))
 
     # Build and compile if needed
-    key = ('ewise_mult', op.name, *left.get_loop_key(), *right.get_loop_key())
+    key = ('ewise_mult', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_ewise_mult(op, left, right)
+        engine_cache[key] = _build_ewise_mult(out_type, op, left, right)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return left.baseclass(output_dtype, left.shape, mem_out,
+    return left.baseclass(out_type, left.shape, mem_out,
                           determine_sparsity(left, right), left.perceived_ordering,
                           intermediate_result=True)
 
 
-def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
-    op_result_dtype = op.get_output_type(left.dtype, right.dtype)
+def _build_ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             rank = left.ndims
             index = ir.IndexType.get()
-            dtype = left.dtype.build_mlir_type()
-            dtype_out = op_result_dtype.build_mlir_type()
+            dtype_left = left.dtype.build_mlir_type()
+            dtype_right = right.dtype.build_mlir_type()
+            dtype_out = out_type.build_mlir_type()
             perm_left = ir.AffineMap.get_permutation(left.permutation)
             perm_right = ir.AffineMap.get_permutation(right.permutation)
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = RankedTensorType(dtype=op_result_dtype,
+            rtt_out = RankedTensorType(dtype=out_type,
                                        sparsity=determine_sparsity(left, right),
                                        ordering=left.perceived_ordering).as_mlir_type()
 
@@ -487,14 +509,14 @@ def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorB
                     ir.ArrayAttr.get([ir.AffineMapAttr.get(p) for p in (perm_left, perm_right, perm_out)]),
                     ir.ArrayAttr.get([ir.Attribute.parse('#linalg.iterator_type<parallel>')]*rank)
                 )
-                block = generic_op.regions[0].blocks.append(dtype, dtype, dtype_out)
+                block = generic_op.regions[0].blocks.append(dtype_left, dtype_right, dtype_out)
                 with ir.InsertionPoint(block):
                     a, b, o = block.arguments
                     res = sparse_tensor.BinaryOp(dtype_out, a, b)
-                    overlap = res.regions[0].blocks.append(dtype, dtype)
+                    overlap = res.regions[0].blocks.append(dtype_left, dtype_right)
                     with ir.InsertionPoint(overlap):
                         arg0, arg1 = overlap.arguments
-                        overlap_res = op(arg0, arg1)
+                        overlap_res = op(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=overlap_res)
                     linalg.YieldOp([res])
                 return generic_op.result
@@ -504,41 +526,42 @@ def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorB
 
 
 # TODO: pass the mask to mxm
-def mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
+def mxm(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
     assert left.ndims == right.ndims == 2
-    assert left.dtype == right.dtype
 
-    optype = op.binop.get_output_type(left.dtype, right.dtype)
     if left._obj is None or right._obj is None:
-        return Matrix.new(optype, left.shape[0], right.shape[1])
+        return Matrix.new(out_type, left.shape[0], right.shape[1])
 
     # Build and compile if needed
-    key = ('mxm', op.name, *left.get_loop_key(), *right.get_loop_key())
+    key = ('mxm', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_mxm(op, left, right)
+        engine_cache[key] = _build_mxm(out_type, op, left, right)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Matrix(optype, [left.shape[0], right.shape[1]], mem_out,
+    return Matrix(out_type, [left.shape[0], right.shape[1]], mem_out,
                   determine_sparsity(left, right), left.perceived_ordering, intermediate_result=True)
 
 
-def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
-    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
+def _build_mxm(out_type: DType,
+               op: Semiring,
+               left: Union[Matrix, TransposedMatrix],
+               right: Union[Matrix, TransposedMatrix]):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             index = ir.IndexType.get()
-            dtype = left.dtype.build_mlir_type()
-            dtype_out = op_result_dtype.build_mlir_type()
+            dtype_left = left.dtype.build_mlir_type()
+            dtype_right = right.dtype.build_mlir_type()
+            dtype_out = out_type.build_mlir_type()
             perm_left = ir.AffineMap.get(3, 0, left._permute([ir.AffineDimExpr.get(0), ir.AffineDimExpr.get(2)]))
             perm_right = ir.AffineMap.get(3, 0, right._permute([ir.AffineDimExpr.get(2), ir.AffineDimExpr.get(1)]))
             perm_out = ir.AffineMap.get(3, 0, [ir.AffineDimExpr.get(0), ir.AffineDimExpr.get(1)])
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = RankedTensorType(dtype=op_result_dtype,
+            rtt_out = RankedTensorType(dtype=out_type,
                                        sparsity=determine_sparsity(left, right),
                                        ordering=left.perceived_ordering).as_mlir_type()
 
@@ -559,21 +582,21 @@ def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union
                         ir.Attribute.parse('#linalg.iterator_type<reduction>'),
                     ])
                 )
-                block = generic_op.regions[0].blocks.append(dtype, dtype, dtype_out)
+                block = generic_op.regions[0].blocks.append(dtype_left, dtype_right, dtype_out)
                 with ir.InsertionPoint(block):
                     a, b, o = block.arguments
                     bin_result = sparse_tensor.BinaryOp(dtype_out, a, b)
-                    overlap = bin_result.regions[0].blocks.append(dtype, dtype)
+                    overlap = bin_result.regions[0].blocks.append(dtype_left, dtype_right)
                     with ir.InsertionPoint(overlap):
                         arg0, arg1 = overlap.arguments
-                        overlap_res = op.binop(arg0, arg1)
+                        overlap_res = op.binop(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=overlap_res)
-                    ident = op.monoid.identity(op_result_dtype)
+                    ident = op.monoid.identity(out_type)
                     red_result = sparse_tensor.ReduceOp(bin_result, o, ident)
                     reduce = red_result.regions[0].blocks.append(dtype_out, dtype_out)
                     with ir.InsertionPoint(reduce):
                         arg0, arg1 = reduce.arguments
-                        reduce_res = op.monoid.binop(arg0, arg1)
+                        reduce_res = op.monoid.binop(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=reduce_res)
                     linalg.YieldOp([red_result])
                 return generic_op.result
@@ -583,41 +606,40 @@ def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union
 
 
 # TODO: pass the mask to mxv
-def mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
+def mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
     assert left.ndims == 2
     assert right.ndims == 1
 
-    optype = op.binop.get_output_type(left.dtype, right.dtype)
     if left._obj is None or right._obj is None:
-        return Vector.new(optype, left.shape[0])
+        return Vector.new(out_type, left.shape[0])
 
     # Build and compile if needed
-    key = ('mxv', op.name, *left.get_loop_key(), *right.get_loop_key())
+    key = ('mxv', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_mxv(op, left, right)
+        engine_cache[key] = _build_mxv(out_type, op, left, right)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(optype, [left.shape[0]], mem_out,
+    return Vector(out_type, [left.shape[0]], mem_out,
                   right._sparsity, right.perceived_ordering, intermediate_result=True)
 
 
-def _build_mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
-    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
+def _build_mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             index = ir.IndexType.get()
-            dtype = left.dtype.build_mlir_type()
-            dtype_out = op_result_dtype.build_mlir_type()
+            dtype_left = left.dtype.build_mlir_type()
+            dtype_right = right.dtype.build_mlir_type()
+            dtype_out = out_type.build_mlir_type()
             perm_left = ir.AffineMap.get(2, 0, left._permute([ir.AffineDimExpr.get(0), ir.AffineDimExpr.get(1)]))
             perm_right = ir.AffineMap.get(2, 0, right._permute([ir.AffineDimExpr.get(1)]))
             perm_out = ir.AffineMap.get(2, 0, [ir.AffineDimExpr.get(0)])
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = right.rtt.copy(dtype=op_result_dtype).as_mlir_type()
+            rtt_out = right.rtt.copy(dtype=out_type).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt_left, rtt_right)
             def main(x, y):
@@ -634,21 +656,21 @@ def _build_mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vecto
                         ir.Attribute.parse('#linalg.iterator_type<reduction>'),
                     ])
                 )
-                block = generic_op.regions[0].blocks.append(dtype, dtype, dtype_out)
+                block = generic_op.regions[0].blocks.append(dtype_left, dtype_right, dtype_out)
                 with ir.InsertionPoint(block):
                     a, b, o = block.arguments
                     bin_result = sparse_tensor.BinaryOp(dtype_out, a, b)
-                    overlap = bin_result.regions[0].blocks.append(dtype, dtype)
+                    overlap = bin_result.regions[0].blocks.append(dtype_left, dtype_right)
                     with ir.InsertionPoint(overlap):
                         arg0, arg1 = overlap.arguments
-                        overlap_res = op.binop(arg0, arg1)
+                        overlap_res = op.binop(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=overlap_res)
-                    ident = op.monoid.identity(op_result_dtype)
+                    ident = op.monoid.identity(out_type)
                     red_result = sparse_tensor.ReduceOp(bin_result, o, ident)
                     reduce = red_result.regions[0].blocks.append(dtype_out, dtype_out)
                     with ir.InsertionPoint(reduce):
                         arg0, arg1 = reduce.arguments
-                        reduce_res = op.monoid.binop(arg0, arg1)
+                        reduce_res = op.monoid.binop(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=reduce_res)
                     linalg.YieldOp([red_result])
                 return generic_op.result
@@ -658,41 +680,40 @@ def _build_mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vecto
 
 
 # TODO: pass the mask to vxm
-def vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
+def vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
     assert left.ndims == 1
     assert right.ndims == 2
 
-    optype = op.binop.get_output_type(left.dtype, right.dtype)
     if left._obj is None or right._obj is None:
-        return Vector.new(optype, right.shape[1])
+        return Vector.new(out_type, right.shape[1])
 
     # Build and compile if needed
-    key = ('vxm', op.name, *left.get_loop_key(), *right.get_loop_key())
+    key = ('vxm', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_vxm(op, left, right)
+        engine_cache[key] = _build_vxm(out_type, op, left, right)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(optype, [right.shape[1]], mem_out,
+    return Vector(out_type, [right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
-def _build_vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
-    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
+def _build_vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             index = ir.IndexType.get()
-            dtype = left.dtype.build_mlir_type()
-            dtype_out = op_result_dtype.build_mlir_type()
+            dtype_left = left.dtype.build_mlir_type()
+            dtype_right = right.dtype.build_mlir_type()
+            dtype_out = out_type.build_mlir_type()
             perm_left = ir.AffineMap.get(2, 0, left._permute([ir.AffineDimExpr.get(0)]))
             perm_right = ir.AffineMap.get(2, 0, right._permute([ir.AffineDimExpr.get(0), ir.AffineDimExpr.get(1)]))
             perm_out = ir.AffineMap.get(2, 0, [ir.AffineDimExpr.get(1)])
             rtt_left = left.rtt.as_mlir_type()
             rtt_right = right.rtt.as_mlir_type()
-            rtt_out = left.rtt.copy(dtype=op_result_dtype).as_mlir_type()
+            rtt_out = left.rtt.copy(dtype=out_type).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt_left, rtt_right)
             def main(x, y):
@@ -709,21 +730,21 @@ def _build_vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix
                         ir.Attribute.parse('#linalg.iterator_type<parallel>'),
                     ])
                 )
-                block = generic_op.regions[0].blocks.append(dtype, dtype, dtype_out)
+                block = generic_op.regions[0].blocks.append(dtype_left, dtype_right, dtype_out)
                 with ir.InsertionPoint(block):
                     a, b, o = block.arguments
                     bin_result = sparse_tensor.BinaryOp(dtype_out, a, b)
-                    overlap = bin_result.regions[0].blocks.append(dtype, dtype)
+                    overlap = bin_result.regions[0].blocks.append(dtype_left, dtype_right)
                     with ir.InsertionPoint(overlap):
                         arg0, arg1 = overlap.arguments
-                        overlap_res = op.binop(arg0, arg1)
+                        overlap_res = op.binop(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=overlap_res)
-                    ident = op.monoid.identity(op_result_dtype)
+                    ident = op.monoid.identity(out_type)
                     red_result = sparse_tensor.ReduceOp(bin_result, o, ident)
                     reduce = red_result.regions[0].blocks.append(dtype_out, dtype_out)
                     with ir.InsertionPoint(reduce):
                         arg0, arg1 = reduce.arguments
-                        reduce_res = op.monoid.binop(arg0, arg1)
+                        reduce_res = op.monoid.binop(out_type, arg0, arg1)
                         sparse_tensor.YieldOp(result=reduce_res)
                     linalg.YieldOp([red_result])
                 return generic_op.result
@@ -732,64 +753,53 @@ def _build_vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix
         return compile(module)
 
 
-def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
+def apply(out_type: DType, op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
           sp: SparseTensorBase,
           left: Optional[Scalar] = None,
           right: Optional[Scalar] = None,
           thunk: Optional[Scalar] = None,
           inplace: bool = False):
-    # Find output dtype
-    optype = type(op)
-    if optype is UnaryOp:
-        output_dtype = op.get_output_type(sp.dtype)
-    elif optype is BinaryOp:
-        if left is not None:
-            output_dtype = op.get_output_type(left.dtype, sp.dtype)
-        else:
-            output_dtype = op.get_output_type(sp.dtype, right.dtype)
-    else:
-        if inplace:
-            raise TypeError("apply inplace not supported for IndexUnaryOp")
-        output_dtype = op.get_output_type(sp.dtype, thunk.dtype)
-
     if sp._obj is None:
-        return sp.baseclass(output_dtype, sp.shape)
+        return sp.baseclass(out_type, sp.shape)
 
+    optype = type(op)
     rank = sp.ndims
     if rank == 0:  # Scalar
         if optype is UnaryOp:
-            key = ('scalar_apply_unary', op.name, sp.dtype)
+            key = ('scalar_apply_unary', op.name, out_type, sp.dtype)
         elif optype is BinaryOp:
             if left is not None:
-                key = ('scalar_apply_bind_first', op.name, sp.dtype, left._obj)
+                key = ('scalar_apply_bind_first', op.name, out_type, sp.dtype, left._obj)
             else:
-                key = ('scalar_apply_bind_second', op.name, sp.dtype, right._obj)
+                key = ('scalar_apply_bind_second', op.name, out_type, sp.dtype, right._obj)
         else:
             raise GrbError("apply scalar not supported for IndexUnaryOp")
 
         if key not in engine_cache:
-            engine_cache[key] = _build_scalar_apply(op, sp, left, right)
-        mem_out = get_scalar_output_pointer(output_dtype)
+            engine_cache[key] = _build_scalar_apply(out_type, op, sp, left, right)
+        mem_out = get_scalar_output_pointer(out_type)
         arg_pointers = [get_scalar_input_arg(sp), mem_out]
         engine_cache[key].invoke('main', *arg_pointers)
-        return Scalar.new(output_dtype, mem_out.contents.value)
+        return Scalar.new(out_type, mem_out.contents.value)
 
     # Build and compile if needed
     # Note that Scalars are included in the key because they are inlined in the compiled code
     if optype is UnaryOp:
-        key = ('apply_unary', op.name, *sp.get_loop_key(), inplace)
+        key = ('apply_unary', op.name, out_type, *sp.get_loop_key(), inplace)
     elif optype is BinaryOp:
         if left is not None:
-            key = ('apply_bind_first', op.name, *sp.get_loop_key(), left._obj, inplace)
+            key = ('apply_bind_first', op.name, out_type, *sp.get_loop_key(), left._obj, inplace)
         else:
-            key = ('apply_bind_second', op.name, *sp.get_loop_key(), right._obj, inplace)
+            key = ('apply_bind_second', op.name, out_type, *sp.get_loop_key(), right._obj, inplace)
     else:
-        key = ('apply_indexunary', op.name, *sp.get_loop_key(), thunk._obj)
+        if inplace:
+            raise TypeError("apply inplace not supported for IndexUnaryOp")
+        key = ('apply_indexunary', op.name, out_type, *sp.get_loop_key(), thunk._obj)
     if key not in engine_cache:
         if inplace:
             engine_cache[key] = _build_apply_inplace(op, sp, left, right)
         else:
-            engine_cache[key] = _build_apply(op, sp, left, right, thunk, output_dtype)
+            engine_cache[key] = _build_apply(out_type, op, sp, left, right, thunk)
 
     # Call the compiled function
     if inplace:
@@ -798,11 +808,12 @@ def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
     mem_out = get_sparse_output_pointer()
     arg_pointers = [sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return sp.baseclass(output_dtype, sp.shape, mem_out,
+    return sp.baseclass(out_type, sp.shape, mem_out,
                         sp._sparsity, sp.perceived_ordering, intermediate_result=True)
 
 
-def _build_scalar_apply(op: Union[UnaryOp, BinaryOp],
+def _build_scalar_apply(out_type: DType,
+                        op: Union[UnaryOp, BinaryOp],
                         sp: SparseTensorBase,
                         left: Optional[Scalar],
                         right: Optional[Scalar]):
@@ -817,24 +828,24 @@ def _build_scalar_apply(op: Union[UnaryOp, BinaryOp],
                 if optype is BinaryOp:
                     if left is not None:
                         left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left.extract_element())
-                        result = op(left_val, x)
+                        result = op(out_type, left_val, x)
                     else:
                         right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right.extract_element())
-                        result = op(x, right_val)
+                        result = op(out_type, x, right_val)
                 else:
-                    result = op(x)
+                    result = op(out_type, x)
                 return result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
         return compile(module)
 
 
-def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
+def _build_apply(out_type: DType,
+                 op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
                  sp: SparseTensorBase,
                  left: Optional[Scalar],
                  right: Optional[Scalar],
-                 thunk: Optional[Scalar],
-                 output_dtype):
+                 thunk: Optional[Scalar]):
     optype = type(op)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
@@ -843,11 +854,11 @@ def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
             index = ir.IndexType.get()
             i64 = ir.IntegerType.get_signless(64)
             dtype = sp.dtype.build_mlir_type()
-            dtype_out = output_dtype.build_mlir_type()
+            dtype_out = out_type.build_mlir_type()
             perm = ir.AffineMap.get_permutation(sp.permutation)
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt = sp.rtt.as_mlir_type()
-            rtt_out = sp.rtt.copy(dtype=output_dtype, ordering=sp.perceived_ordering).as_mlir_type()
+            rtt_out = sp.rtt.copy(dtype=out_type, ordering=sp.perceived_ordering).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt)
             def main(x):
@@ -879,16 +890,16 @@ def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
                                 thunk_val = arith.ConstantOp(index, thunk.extract_element())
                             else:
                                 thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk.extract_element())
-                            val = op(arg0, rowidx, colidx, thunk_val)
+                            val = op(out_type, arg0, rowidx, colidx, thunk_val)
                         elif optype is BinaryOp:
                             if left is not None:
                                 left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left.extract_element())
-                                val = op(left_val, arg0)
+                                val = op(out_type, left_val, arg0)
                             else:
                                 right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right.extract_element())
-                                val = op(arg0, right_val)
+                                val = op(out_type, arg0, right_val)
                         else:
-                            val = op(arg0)
+                            val = op(out_type, arg0)
                         sparse_tensor.YieldOp(result=val)
                     linalg.YieldOp([res])
                 return generic_op.result
@@ -902,10 +913,6 @@ def _build_apply_inplace(op: Union[UnaryOp, BinaryOp],
                          left: Optional[Scalar],
                          right: Optional[Scalar]):
     optype = type(op)
-    op_result_dtype = op.get_output_type(sp.dtype)
-    if op_result_dtype != sp.dtype:
-        raise TypeError("apply inplace is restricted from changing dtype")
-
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -927,12 +934,12 @@ def _build_apply_inplace(op: Union[UnaryOp, BinaryOp],
                     if optype is BinaryOp:
                         if left is not None:
                             left_val = arith.ConstantOp(left.dtype.build_mlir_type(), left.extract_element())
-                            result = op(left_val, val)
+                            result = op(sp.dtype, left_val, val)
                         else:
                             right_val = arith.ConstantOp(right.dtype.build_mlir_type(), right.extract_element())
-                            result = op(val, right_val)
+                            result = op(sp.dtype, val, right_val)
                     else:
-                        result = op(val)
+                        result = op(sp.dtype, val)
                     memref.StoreOp(result, vals, [x])
                     scf.YieldOp([])
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -940,10 +947,10 @@ def _build_apply_inplace(op: Union[UnaryOp, BinaryOp],
         return compile(module)
 
 
-def select(op: SelectOp, sp: SparseTensor, thunk: Scalar):
+def select(out_type: DType, op: SelectOp, sp: SparseTensor, thunk: Scalar):
     # Handle case of empty tensor
     if sp._obj is None:
-        return sp.__class__(sp.dtype, sp.shape)
+        return sp.__class__(out_type, sp.shape)
 
     rank = sp.ndims
     if rank == 0:  # Scalar
@@ -955,9 +962,9 @@ def select(op: SelectOp, sp: SparseTensor, thunk: Scalar):
         engine_cache[key].invoke('main', *arg_pointers)
         # Invocation returns True/False for whether to keep value
         if mem_out.contents.value:
-            return sp.dup()
+            return Scalar.new(out_type, sp._obj)
         else:
-            return Scalar.new(sp.dtype)
+            return Scalar.new(out_type)
 
     # Build and compile if needed
     # Note that thunk is included in the key because it is inlined in the compiled code
@@ -969,8 +976,14 @@ def select(op: SelectOp, sp: SparseTensor, thunk: Scalar):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return sp.baseclass(sp.dtype, sp.shape, mem_out,
-                            sp._sparsity, sp.perceived_ordering, intermediate_result=True)
+    res = sp.baseclass(sp.dtype, sp.shape, mem_out,
+                       sp._sparsity, sp.perceived_ordering, intermediate_result=True)
+
+    # _build_select cannot change output dtype; handle that now
+    if out_type != sp.dtype:
+        res = dup(out_type, res, intermediate=True)
+
+    return res
 
 
 def _build_scalar_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
@@ -987,7 +1000,7 @@ def _build_scalar_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
                     thunk_val = arith.ConstantOp(index, thunk.extract_element())
                 else:
                     thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk.extract_element())
-                cmp = op(x, c0, c0, thunk_val)
+                cmp = op(BOOL, x, c0, c0, thunk_val)
                 return cmp
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
@@ -1035,7 +1048,7 @@ def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
                             thunk_val = arith.ConstantOp(index, thunk.extract_element())
                         else:
                             thunk_val = arith.ConstantOp(thunk.dtype.build_mlir_type(), thunk.extract_element())
-                        cmp = op(arg0, rowidx, colidx, thunk_val)
+                        cmp = op(BOOL, arg0, rowidx, colidx, thunk_val)
                         sparse_tensor.YieldOp(result=cmp)
                     linalg.YieldOp([res])
                 return generic_op.result
@@ -1044,9 +1057,9 @@ def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
         return compile(module)
 
 
-def reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
+def reduce_to_vector(out_type: DType, op: Monoid, mat: Union[Matrix, TransposedMatrix]):
     if mat._obj is None:
-        return Vector.new(mat.dtype, mat.shape[0])
+        return Vector.new(out_type, mat.shape[0])
 
     # Build and compile if needed
     key = ('reduce_to_vector', op.name, *mat.get_loop_key())
@@ -1057,8 +1070,14 @@ def reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [mat._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(mat.dtype, [mat.shape[0]], mem_out,
-                  [DimLevelType.compressed], [0], intermediate_result=True)
+    res = Vector(mat.dtype, [mat.shape[0]], mem_out,
+                 [DimLevelType.compressed], [0], intermediate_result=True)
+
+    # _build_reduce_to_vector cannot change output dtype; handle that now
+    if out_type != mat.dtype:
+        res = dup(out_type, res, intermediate=True)
+
+    return res
 
 
 def _build_reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
@@ -1093,7 +1112,7 @@ def _build_reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
                     region = res.regions[0].blocks.append(dtype, dtype)
                     with ir.InsertionPoint(region):
                         arg0, arg1 = region.arguments
-                        reduce_res = op.binop(arg0, arg1)
+                        reduce_res = op.binop(mat.dtype, arg0, arg1)
                         sparse_tensor.YieldOp(result=reduce_res)
                     linalg.YieldOp([res])
                 return generic_op.result
@@ -1102,28 +1121,27 @@ def _build_reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
         return compile(module)
 
 
-def reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
+def reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase):
     if sp._obj is None:
-        return Scalar.new(sp.dtype)
+        return Scalar.new(out_type)
 
     # Build and compile if needed
-    key = ('reduce_to_scalar', op.name, *sp.get_loop_key())
+    key = ('reduce_to_scalar', op.name, out_type, *sp.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_reduce_to_scalar(op, sp)
+        engine_cache[key] = _build_reduce_to_scalar(out_type, op, sp)
 
     # Call the compiled function
-    mem_out = get_scalar_output_pointer(sp.dtype)
+    mem_out = get_scalar_output_pointer(out_type)
     arg_pointers = [sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Scalar.new(sp.dtype, mem_out.contents.value)
+    return Scalar.new(out_type, mem_out.contents.value)
 
 
-def _build_reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
+def _build_reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             rank = sp.ndims
-            index = ir.IndexType.get()
             dtype = sp.dtype.build_mlir_type()
             perm = ir.AffineMap.get_permutation(sp.permutation)
             perm_out = ir.AffineMap.get(rank, 0, [])
@@ -1148,17 +1166,18 @@ def _build_reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
                     region = res.regions[0].blocks.append(dtype, dtype)
                     with ir.InsertionPoint(region):
                         arg0, arg1 = region.arguments
-                        reduce_res = op.binop(arg0, arg1)
+                        reduce_res = op.binop(sp.dtype, arg0, arg1)
                         sparse_tensor.YieldOp(result=reduce_res)
                     linalg.YieldOp([res])
                 s = tensor.ExtractOp(generic_op, [])
+                s = cast(s, sp.dtype, out_type)
                 return s.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
         return compile(module)
 
 
-def extract(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size):
+def extract(out_type: DType, tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size):
     # There may be a way to do this in MLIR, but for now we use numpy
     if tensor.ndims == 1:
         # Vector
@@ -1166,20 +1185,24 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_si
         assert col_size is None
 
         if row_indices is None:  # None indicates GrB_ALL
-            return dup(tensor)
+            return dup(out_type, tensor)
 
         idx, vals = tensor.extract_tuples()
+        if out_type != tensor.dtype:
+            vals = vals.astype(out_type.np_type)
         pick_list = np.array(row_indices, dtype=np.uint64)
         idx, vals = pick_and_renumber_indices(pick_list, idx, vals)
-        v = Vector.new(tensor.dtype, row_size)
+        v = Vector.new(out_type, row_size)
         v.build(idx, vals)
         return v
 
     # Matrix
     if row_indices is None and col_indices is None:
-        return dup(tensor)
+        return dup(out_type, tensor)
 
     rowidx, colidx, vals = tensor.extract_tuples()
+    if out_type != tensor.dtype:
+        vals = vals.astype(out_type.np_type)
     if row_indices is not None:
         if type(row_indices) is int:
             pick_list = np.array([row_indices], dtype=np.uint64)
@@ -1195,39 +1218,41 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_si
     if type(row_indices) is int:
         # Extract row as Vector
         assert np.all(rowidx == 0)
-        v = Vector.new(tensor.dtype, col_size)
+        v = Vector.new(out_type, col_size)
         v.build(colidx, vals)
         return v
     if type(col_indices) is int:
         # Extract col as Vector
         assert np.all(colidx == 0)
-        v = Vector.new(tensor.dtype, row_size)
+        v = Vector.new(out_type, row_size)
         v.build(rowidx, vals)
         return v
-    m = Matrix.new(tensor.dtype, row_size, col_size)
+    m = Matrix.new(out_type, row_size, col_size)
     m.build(rowidx, colidx, vals)
     return m
 
 
-def assign(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size=None):
+def assign(out_type: DType, tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size=None):
     # There may be a way to do this in MLIR, but for now we use numpy
     if tensor.ndims == 1:
         # Vector input
         if row_indices is None and col_size is None:
             # Vector output with GrB_ALL
-            return dup(tensor)
+            return dup(out_type, tensor)
 
         idx, vals = tensor.extract_tuples()
+        if out_type != tensor.dtype:
+            vals = vals.astype(out_type.np_type)
 
         if col_size is None:
             # Vector output
-            v = Vector.new(tensor.dtype, row_size)
+            v = Vector.new(out_type, row_size)
             # Map idx to output indices
             idx = np.array(row_indices, dtype=np.uint64)[idx]
             v.build(idx, vals, sparsity=tensor._sparsity)
             return v
         # Assign Vector as row or column of Matrix
-        m = Matrix.new(tensor.dtype, row_size, col_size)
+        m = Matrix.new(out_type, row_size, col_size)
         if type(row_indices) is int:
             # Map idx to output cols
             colidx = idx if col_indices is None else np.array(col_indices, dtype=np.uint64)[idx]
@@ -1240,15 +1265,17 @@ def assign(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_siz
 
     # Matrix input
     if row_indices is None and col_indices is None:
-        return dup(tensor)
+        return dup(out_type, tensor)
 
     rowidx, colidx, vals = tensor.extract_tuples()
+    if out_type != tensor.dtype:
+        vals = vals.astype(out_type.np_type)
 
     # Map indices to output
     if row_indices is not None:
         rowidx = np.array(row_indices, dtype=np.uint64)[rowidx]
     if col_indices is not None:
         colidx = np.array(col_indices, dtype=np.uint64)[colidx]
-    m = Matrix.new(tensor.dtype, row_size, col_size)
+    m = Matrix.new(out_type, row_size, col_size)
     m.build(rowidx, colidx, vals, sparsity=["compressed", "compressed"])
     return m

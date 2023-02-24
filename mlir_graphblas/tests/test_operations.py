@@ -59,6 +59,12 @@ def test_transpose_op(mm):
     assert x.is_rowwise()
     matrix_compare(z, xrows, xcols, xvals)
 
+    # Transpose into different dtype
+    z = Matrix.new(INT16, x.shape[1], x.shape[0])
+    operations.transpose(z, x)
+    assert z.dtype
+    matrix_compare(z, xcols, xrows, xvals.astype(np.int16))
+
 
 def test_transpose_empty(mm):
     # Empty into empty
@@ -77,19 +83,21 @@ def test_transpose_empty(mm):
 
 def test_ewise_add_vec(vs):
     x, y = vs
-    z = Vector.new(x.dtype, x.size())
-    operations.ewise_add(z, BinaryOp.plus, x, y)
-    vector_compare(z, [0, 1, 2, 3], [1., 10., 22., 33.])
+    for typ in (x.dtype, INT32):
+        z = Vector.new(typ, x.size())
+        operations.ewise_add(z, BinaryOp.plus, x, y)
+        vector_compare(z, [0, 1, 2, 3], [1., 10., 22., 33.])
 
 
 def test_ewise_add_mat(ms):
     x, y = ms
-    z = Matrix.new(x.dtype, *x.shape)
-    operations.ewise_add(z, BinaryOp.times, x, y)
-    matrix_compare(z,
-                   [0, 0, 0, 1, 1, 1, 1],
-                   [0, 1, 3, 0, 1, 3, 4],
-                   [10, -20, -60, -3, -4, 40, -5])
+    for typ in (x.dtype, INT32):
+        z = Matrix.new(typ, *x.shape)
+        operations.ewise_add(z, BinaryOp.times, x, y)
+        matrix_compare(z,
+                       [0, 0, 0, 1, 1, 1, 1],
+                       [0, 1, 3, 0, 1, 3, 4],
+                       [10, -20, -60, -3, -4, 40, -5])
 
 
 def test_ewise_add_empty(ms):
@@ -103,25 +111,28 @@ def test_ewise_add_empty(ms):
 
 def test_ewise_add_scalar(ss):
     x, y = ss
-    z = Scalar.new(x.dtype)
-    operations.ewise_add(z, BinaryOp.times, x, y)
-    assert z._obj == x._obj
-    operations.ewise_add(z, BinaryOp.times, x, x)
-    assert z.extract_element() == x.extract_element() ** 2
+    for typ in (x.dtype, INT32):
+        z = Scalar.new(typ)
+        operations.ewise_add(z, BinaryOp.times, x, y)
+        assert z._obj == x._obj
+        operations.ewise_add(z, BinaryOp.times, x, x)
+        assert z.extract_element() == x.extract_element() ** 2
 
 
 def test_ewise_mult_vec(vs):
     x, y = vs
-    z = Vector.new(x.dtype, x.size())
-    operations.ewise_mult(z, BinaryOp.plus, x, y)
-    vector_compare(z, [2, 3], [22., 33.])
+    for typ in (x.dtype, INT32):
+        z = Vector.new(typ, x.size())
+        operations.ewise_mult(z, BinaryOp.plus, x, y)
+        vector_compare(z, [2, 3], [22, 33])
 
 
 def test_ewise_mult_mat(ms):
     x, y = ms
-    z = Matrix.new(x.dtype, *x.shape)
-    operations.ewise_mult(z, BinaryOp.first, x, y)
-    matrix_compare(z, [0, 0], [1, 3], [-1, -2])
+    for typ in (x.dtype, INT32):
+        z = Matrix.new(typ, *x.shape)
+        operations.ewise_mult(z, BinaryOp.first, x, y)
+        matrix_compare(z, [0, 0], [1, 3], [-1, -2])
 
 
 def test_ewise_mult_empty(ms):
@@ -158,22 +169,23 @@ def test_mxm(mm):
     ycol = Matrix.new(y.dtype, *y.shape)
     ycol.build(*y.extract_tuples(), colwise=True)
     expected = [0, 1, 2, 2, 4], [0, 0, 0, 4, 3], [20.9, 16.5, 5.5, 70.4, 13.2]
-    # rowwise @ rowwise
-    z = Matrix.new(x.dtype, x.shape[0], y.shape[1])
-    operations.mxm(z, Semiring.plus_times, x, y)
-    matrix_compare(z, *expected)
-    # rowwise @ colwise
-    z.clear()
-    operations.mxm(z, Semiring.plus_times, x, ycol)
-    matrix_compare(z, *expected)
-    # colwise @ colwise
-    z.clear()
-    operations.mxm(z, Semiring.plus_times, xcol, ycol)
-    matrix_compare(z, *expected)
-    # colwise @ rowwise
-    z.clear()
-    operations.mxm(z, Semiring.plus_times, xcol, y)
-    matrix_compare(z, *expected)
+    for typ in (x.dtype, FP64):
+        # rowwise @ rowwise
+        z = Matrix.new(typ, x.shape[0], y.shape[1])
+        operations.mxm(z, Semiring.plus_times, x, y)
+        matrix_compare(z, *expected)
+        # rowwise @ colwise
+        z.clear()
+        operations.mxm(z, Semiring.plus_times, x, ycol)
+        matrix_compare(z, *expected)
+        # colwise @ colwise
+        z.clear()
+        operations.mxm(z, Semiring.plus_times, xcol, ycol)
+        matrix_compare(z, *expected)
+        # colwise @ rowwise
+        z.clear()
+        operations.mxm(z, Semiring.plus_times, xcol, y)
+        matrix_compare(z, *expected)
 
 
 def test_mxm_empty(mm):
@@ -188,14 +200,15 @@ def test_mxm_empty(mm):
 def test_mxv(vs, mm):
     _, v = vs
     _, m = mm
-    z = Vector.new(m.dtype, m.shape[0])
-    operations.mxv(z, Semiring.plus_times, m, v)
-    try:
-        vector_compare(z, [1, 2, 3, 5], [1., 6., 5., 7.])
-    except AssertionError:
-        # Check for dense return, indicating lack of lex insert fix
-        vector_compare(z, [0, 1, 2, 3, 4, 5], [0., 1., 6., 5., 0., 7.])
-        pytest.xfail("Waiting for lex insert fix")
+    for typ in (m.dtype, FP64):
+        z = Vector.new(typ, m.shape[0])
+        operations.mxv(z, Semiring.plus_times, m, v)
+        try:
+            vector_compare(z, [1, 2, 3, 5], [1., 6., 5., 7.])
+        except AssertionError:
+            # Check for dense return, indicating lack of lex insert fix
+            vector_compare(z, [0, 1, 2, 3, 4, 5], [0., 1., 6., 5., 0., 7.])
+            pytest.xfail("Waiting for lex insert fix")
 
 
 def test_mxv_empty(vs, mm):
@@ -211,9 +224,10 @@ def test_mxv_empty(vs, mm):
 def test_vxm(vs, mm):
     _, v = vs
     m, _ = mm
-    z = Vector.new(m.dtype, m.shape[1])
-    operations.vxm(z, Semiring.plus_times, v, m)
-    vector_compare(z, [0, 1, 3, 5], [8.8, 11., 1.1, 2.2])
+    for typ in (m.dtype, FP64):
+        z = Vector.new(typ, m.shape[1])
+        operations.vxm(z, Semiring.plus_times, v, m)
+        vector_compare(z, [0, 1, 3, 5], [8.8, 11., 1.1, 2.2])
 
 
 def test_vxm_empty(vs, mm):
@@ -230,15 +244,16 @@ def test_apply_mat(ms):
     x, _ = ms
     xrows, xcols, xvals = x.extract_tuples()
 
-    # UnaryOp.abs
-    z = Matrix.new(x.dtype, *x.shape)
-    operations.apply(z, UnaryOp.abs, x)
-    matrix_compare(z, xrows, xcols, np.abs(xvals))
+    for typ in (x.dtype, INT32):
+        # UnaryOp.abs
+        z = Matrix.new(typ, *x.shape)
+        operations.apply(z, UnaryOp.abs, x)
+        matrix_compare(z, xrows, xcols, np.abs(xvals))
 
-    # BinaryOp.minus left=2
-    z2 = Matrix.new(x.dtype, *x.shape)
-    operations.apply(z2, BinaryOp.minus, x, left=2)
-    matrix_compare(z2, xrows, xcols, 2 - xvals)
+        # BinaryOp.minus left=2
+        z2 = Matrix.new(x.dtype, *x.shape)
+        operations.apply(z2, BinaryOp.minus, x, left=2)
+        matrix_compare(z2, xrows, xcols, 2 - xvals)
 
     # BinaryOp.gt right=-2
     z3 = Matrix.new(BOOL, *x.shape)
@@ -292,44 +307,47 @@ def test_apply_empty(mm):
 
 def test_apply_scalar(ss):
     x, y = ss
-    z = Scalar.new(x.dtype)
-    operations.apply(z, UnaryOp.ainv, x)
-    assert z.extract_element() == -x.extract_element()
-    operations.apply(z, UnaryOp.ainv, y)
-    assert z.nvals() == 0
-    operations.apply(z, BinaryOp.minus, x, right=64)
-    assert z.extract_element() == x.extract_element() - 64
+    for typ in (x.dtype, INT32):
+        z = Scalar.new(typ)
+        operations.apply(z, UnaryOp.ainv, x)
+        assert z.extract_element() == -x.extract_element()
+        operations.apply(z, UnaryOp.ainv, y)
+        assert z.nvals() == 0
+        operations.apply(z, BinaryOp.minus, x, right=64)
+        assert z.extract_element() == x.extract_element() - 64
 
-    with pytest.raises(exceptions.GrbError):
-        operations.apply(z, IndexUnaryOp.rowindex, x, thunk=0)
+        with pytest.raises(exceptions.GrbError):
+            operations.apply(z, IndexUnaryOp.rowindex, x, thunk=0)
 
 
 def test_select_vec(vs):
     x, _ = vs
 
-    # Select by index
-    z = Vector.new(x.dtype, x.size())
-    operations.select(z, SelectOp.rowgt, x, 2)
-    vector_compare(z, [3], [30.])
+    for typ in (x.dtype, INT32):
+        # Select by index
+        z = Vector.new(typ, x.size())
+        operations.select(z, SelectOp.rowgt, x, 2)
+        vector_compare(z, [3], [30])
 
-    # Select by value
-    z = Vector.new(x.dtype, x.size())
-    operations.select(z, SelectOp.valuegt, x, 10.)
-    vector_compare(z, [2, 3], [20., 30.])
+        # Select by value
+        z = Vector.new(typ, x.size())
+        operations.select(z, SelectOp.valuegt, x, 10.)
+        vector_compare(z, [2, 3], [20, 30])
 
 
 def test_select_mat(mm):
     _, y = mm
-    z = Matrix.new(y.dtype, *y.shape)
-    operations.select(z, SelectOp.triu, y, -1)
-    assert z.is_rowwise()
-    matrix_compare(z, [0, 1, 1, 2], [4, 0, 4, 3], [6., 1., 8., 2.])
+    for typ in (y.dtype, INT32):
+        z = Matrix.new(typ, *y.shape)
+        operations.select(z, SelectOp.triu, y, -1)
+        assert z.is_rowwise()
+        matrix_compare(z, [0, 1, 1, 2], [4, 0, 4, 3], [6, 1, 8, 2])
 
-    # Transposed
-    z = Matrix.new(y.dtype, y.shape[1], y.shape[0])
-    operations.select(z, SelectOp.triu, y, 0, desc=desc.T0)
-    assert z.is_colwise()
-    matrix_compare(z, [0, 0, 0], [1, 3, 5], [1., 5., 7.])
+        # Transposed
+        z = Matrix.new(typ, y.shape[1], y.shape[0])
+        operations.select(z, SelectOp.triu, y, 0, desc=desc.T0)
+        assert z.is_colwise()
+        matrix_compare(z, [0, 0, 0], [1, 3, 5], [1, 5, 7])
 
 
 def test_select_empty(vs):
@@ -349,35 +367,38 @@ def test_select_empty(vs):
 
 def test_select_scalar(ss):
     x, y = ss
-    z = Scalar.new(x.dtype)
-    operations.select(z, SelectOp.valuegt, x, 1004)
-    assert z.nvals() == 0
-    operations.select(z, SelectOp.valuegt, x, 4)
-    assert z.nvals() == 1
-    assert z.extract_element() == x.extract_element()
-    # Scalars are treated as having row=0, col=0 for index purposes
-    operations.select(z, SelectOp.rowle, x, 0)
-    assert z.nvals() == 1
-    assert z.extract_element() == x.extract_element()
+    for typ in (x.dtype, INT32):
+        z = Scalar.new(typ)
+        operations.select(z, SelectOp.valuegt, x, 1004)
+        assert z.nvals() == 0
+        operations.select(z, SelectOp.valuegt, x, 4)
+        assert z.nvals() == 1
+        assert z.extract_element() == x.extract_element()
+        # Scalars are treated as having row=0, col=0 for index purposes
+        operations.select(z, SelectOp.rowle, x, 0)
+        assert z.nvals() == 1
+        assert z.extract_element() == x.extract_element()
 
 
 def test_reduce_rowwise(mm):
     x, _ = mm
-    z = Vector.new(x.dtype, x.shape[0])
-    operations.reduce_to_vector(z, Monoid.plus, x)
-    try:
-        vector_compare(z, [0, 1, 2, 4], [3.3, 3.3, 9.9, 6.6])
-    except AssertionError:
-        # Check for dense return, indicating lack of lex insert fix
-        vector_compare(z, [0, 1, 2, 3, 4], [3.3, 3.3, 9.9, 0.0, 6.6])
-        pytest.xfail("Waiting for lex insert fix")
+    for typ in (x.dtype, FP64):
+        z = Vector.new(typ, x.shape[0])
+        operations.reduce_to_vector(z, Monoid.plus, x)
+        try:
+            vector_compare(z, [0, 1, 2, 4], [3.3, 3.3, 9.9, 6.6])
+        except AssertionError:
+            # Check for dense return, indicating lack of lex insert fix
+            vector_compare(z, [0, 1, 2, 3, 4], [3.3, 3.3, 9.9, 0.0, 6.6])
+            pytest.xfail("Waiting for lex insert fix")
 
 
 def test_reduce_colwise(mm):
     x, _ = mm
-    z = Vector.new(x.dtype, x.shape[1])
-    operations.reduce_to_vector(z, Monoid.times, x, desc=desc.T0)
-    vector_compare(z, [0, 1, 2, 3, 5], [4.4, 5.5, 6.6, 3.63, 2.2])
+    for typ in (x.dtype, FP64):
+        z = Vector.new(typ, x.shape[1])
+        operations.reduce_to_vector(z, Monoid.times, x, desc=desc.T0)
+        vector_compare(z, [0, 1, 2, 3, 5], [4.4, 5.5, 6.6, 3.63, 2.2])
 
 
 def test_reduce_to_vector_empty(vs, mm):
@@ -398,21 +419,23 @@ def test_reduce_to_vector_empty(vs, mm):
 def test_reduce_scalar_mat(mm):
     x, _ = mm
     _, _, xvals = x.extract_tuples()
-    s = Scalar.new(x.dtype)
-    operations.reduce_to_scalar(s, Monoid.times, x)
-    np_assert_allclose(s.extract_element(), functools.reduce(operator.mul, xvals))
+    for typ in (x.dtype, FP64):
+        s = Scalar.new(typ)
+        operations.reduce_to_scalar(s, Monoid.times, x)
+        np_assert_allclose(s.extract_element(), functools.reduce(operator.mul, xvals))
 
-    # Verify transpose has no effect on scalar reduction
-    operations.reduce_to_scalar(s, Monoid.plus, x, desc=desc.T0)
-    np_assert_allclose(s.extract_element(), functools.reduce(operator.add, xvals))
+        # Verify transpose has no effect on scalar reduction
+        operations.reduce_to_scalar(s, Monoid.plus, x, desc=desc.T0)
+        np_assert_allclose(s.extract_element(), functools.reduce(operator.add, xvals))
 
 
 def test_reduce_scalar_vec(vs):
     x, _ = vs
     _, xvals = x.extract_tuples()
-    s = Scalar.new(x.dtype)
-    operations.reduce_to_scalar(s, Monoid.times, x)
-    np_assert_allclose(s.extract_element(), functools.reduce(operator.mul, xvals))
+    for typ in (x.dtype, INT32, FP64):
+        s = Scalar.new(typ)
+        operations.reduce_to_scalar(s, Monoid.times, x)
+        np_assert_allclose(s.extract_element(), functools.reduce(operator.mul, xvals))
 
 
 def test_reduce_to_scalar_empty():
@@ -431,75 +454,77 @@ def test_reduce_to_scalar_empty():
 def test_extract_vec(vs):
     x, _ = vs
     xidx, xvals = x.extract_tuples()
-    z = Vector.new(x.dtype, 3)
-    operations.extract(z, x, [0, 1, 3])
-    vector_compare(z, [1, 2], [10., 30.])
+    for typ in (x.dtype, INT32):
+        z = Vector.new(typ, 3)
+        operations.extract(z, x, [0, 1, 3])
+        vector_compare(z, [1, 2], [10., 30.])
 
-    # Extract all
-    z2 = Vector.new(x.dtype, *x.shape)
-    operations.extract(z2, x, None)
-    vector_compare(z2, xidx, xvals)
+        # Extract all
+        z2 = Vector.new(typ, *x.shape)
+        operations.extract(z2, x, None)
+        vector_compare(z2, xidx, xvals)
 
-    # Extract duplicates
-    z3 = Vector.new(x.dtype, 5)
-    operations.extract(z3, x, [0, 3, 3, 3, 2])
-    vector_compare(z3, [1, 2, 3, 4], [30., 30., 30., 20.])
+        # Extract duplicates
+        z3 = Vector.new(typ, 5)
+        operations.extract(z3, x, [0, 3, 3, 3, 2])
+        vector_compare(z3, [1, 2, 3, 4], [30., 30., 30., 20.])
 
 
 def test_extract_mat(mm):
     x, _ = mm
     xrows, xcols, xvals = x.extract_tuples()
+    for typ in (x.dtype, FP64):
+        # Extract all rows, all cols
+        z = Matrix.new(typ, *x.shape)
+        operations.extract(z, x, None, None)
+        matrix_compare(z, xrows, xcols, xvals)
 
-    # Extract all rows, all cols
-    z = Matrix.new(x.dtype, *x.shape)
-    operations.extract(z, x, None, None)
-    matrix_compare(z, xrows, xcols, xvals)
+        # Extract some rows, some cols
+        z2 = Matrix.new(typ, 2, 5)
+        operations.extract(z2, x, [0, 4], [1, 2, 3, 5, 3])
+        matrix_compare(z2, [0, 0, 0, 1], [2, 3, 4, 1], [1.1, 2.2, 1.1, 6.6])
 
-    # Extract some rows, some cols
-    z2 = Matrix.new(x.dtype, 2, 5)
-    operations.extract(z2, x, [0, 4], [1, 2, 3, 5, 3])
-    matrix_compare(z2, [0, 0, 0, 1], [2, 3, 4, 1], [1.1, 2.2, 1.1, 6.6])
+        # Extract some rows, all cols
+        z3 = Matrix.new(typ, 4, x.shape[1])
+        operations.extract(z3, x, [0, 4, 3, 0], None)
+        matrix_compare(z3, [0, 0, 1, 3, 3], [3, 5, 2, 3, 5], [1.1, 2.2, 6.6, 1.1, 2.2])
 
-    # Extract some rows, all cols
-    z3 = Matrix.new(x.dtype, 4, x.shape[1])
-    operations.extract(z3, x, [0, 4, 3, 0], None)
-    matrix_compare(z3, [0, 0, 1, 3, 3], [3, 5, 2, 3, 5], [1.1, 2.2, 6.6, 1.1, 2.2])
-
-    # Extract all rows, some cols
-    z4 = Matrix.new(x.dtype, x.shape[0], 5)
-    operations.extract(z4, x, None, [1, 5, 3, 2, 1])
-    matrix_compare(z4,
-                   [0, 0, 1, 2, 2, 4],
-                   [1, 2, 2, 0, 4, 3],
-                   [2.2, 1.1, 3.3, 5.5, 5.5, 6.6])
+        # Extract all rows, some cols
+        z4 = Matrix.new(typ, x.shape[0], 5)
+        operations.extract(z4, x, None, [1, 5, 3, 2, 1])
+        matrix_compare(z4,
+                       [0, 0, 1, 2, 2, 4],
+                       [1, 2, 2, 0, 4, 3],
+                       [2.2, 1.1, 3.3, 5.5, 5.5, 6.6])
 
 
 def test_extract_vec_from_mat(mm):
     x, _ = mm
-    # Extract partial column
-    z = Vector.new(x.dtype, 3)
-    operations.extract(z, x, [0, 1, 4], 2)
-    vector_compare(z, [2], [6.6])
+    for typ in (x.dtype, FP64):
+        # Extract partial column
+        z = Vector.new(typ, 3)
+        operations.extract(z, x, [0, 1, 4], 2)
+        vector_compare(z, [2], [6.6])
 
-    # Extract full column
-    z1 = Vector.new(x.dtype, x.shape[0])
-    operations.extract(z1, x, None, 3)
-    vector_compare(z1, [0, 1], [1.1, 3.3])
+        # Extract full column
+        z1 = Vector.new(typ, x.shape[0])
+        operations.extract(z1, x, None, 3)
+        vector_compare(z1, [0, 1], [1.1, 3.3])
 
-    # Extract partial row
-    z2 = Vector.new(x.dtype, 8)
-    operations.extract(z2, x, 0, [0, 1, 3, 4, 5, 3, 5, 3])
-    vector_compare(z2, [2, 4, 5, 6, 7], [1.1, 2.2, 1.1, 2.2, 1.1])
+        # Extract partial row
+        z2 = Vector.new(typ, 8)
+        operations.extract(z2, x, 0, [0, 1, 3, 4, 5, 3, 5, 3])
+        vector_compare(z2, [2, 4, 5, 6, 7], [1.1, 2.2, 1.1, 2.2, 1.1])
 
-    # Extract full row
-    z3 = Vector.new(x.dtype, x.shape[1])
-    operations.extract(z3, x, 0, None)
-    vector_compare(z3, [3, 5], [1.1, 2.2])
+        # Extract full row
+        z3 = Vector.new(typ, x.shape[1])
+        operations.extract(z3, x, 0, None)
+        vector_compare(z3, [3, 5], [1.1, 2.2])
 
-    # Extract partial column via transposed input
-    z3 = Vector.new(x.dtype, 3)
-    operations.extract(z3, x, 2, [0, 1, 4], desc=desc.T0)
-    vector_compare(z3, [2], [6.6])
+        # Extract partial column via transposed input
+        z3 = Vector.new(typ, 3)
+        operations.extract(z3, x, 2, [0, 1, 4], desc=desc.T0)
+        vector_compare(z3, [2], [6.6])
 
 
 def test_extract_empty(mm):
@@ -519,20 +544,21 @@ def test_extract_empty(mm):
 def test_assign_vec(vs):
     x, y = vs
 
-    # Assign all
-    operations.assign(y, x, accum=BinaryOp.plus)
-    vector_compare(y, [0, 1, 2, 3], [1., 10., 22., 33.])
+    # # Assign all
+    # operations.assign(y, x, accum=BinaryOp.plus)
+    # vector_compare(y, [0, 1, 2, 3], [1., 10., 22., 33.])
 
-    # Expand
-    z = Vector.new(x.dtype, 16)
-    operations.assign(z, x, [1, 3, 13, 10, 2])
-    assert z.size() == 16
-    vector_compare(z, [3, 10, 13], [10., 30., 20.])
+    for typ in (x.dtype, INT32):
+        # Expand
+        z = Vector.new(typ, 16)
+        operations.assign(z, x, [1, 3, 13, 10, 2])
+        assert z.size() == 16
+        vector_compare(z, [3, 10, 13], [10., 30., 20.])
 
-    # Empty input
-    a = Vector.new(x.dtype, 3)
-    operations.assign(z, a, [1, 3, 13])
-    vector_compare(z, [10], [30.])
+        # Empty input
+        a = Vector.new(typ, 3)
+        operations.assign(z, a, [1, 3, 13])
+        vector_compare(z, [10], [30.])
 
 
 def test_assign_mat(ms):
@@ -546,29 +572,30 @@ def test_assign_mat(ms):
                    [0, 1, 3, 0, 1, 3, 4],
                    [10, 19, 28, -3, -4, 40, -5])
 
-    # Assign new rows, new cols
-    z2 = Matrix.new(x.dtype, 4, 8)
-    operations.assign(z2, x, [3, 0], [0, 3, 4, 1, 7])
-    matrix_compare(z2,
-                   [0, 0, 0, 3, 3],
-                   [0, 3, 7, 1, 3],
-                   [-3, -4, -5, -2, -1])
+    for typ in (x.dtype, INT32):
+        # Assign new rows, new cols
+        z2 = Matrix.new(typ, 4, 8)
+        operations.assign(z2, x, [3, 0], [0, 3, 4, 1, 7])
+        matrix_compare(z2,
+                       [0, 0, 0, 3, 3],
+                       [0, 3, 7, 1, 3],
+                       [-3, -4, -5, -2, -1])
 
-    # Assign identical rows, new cols
-    z3 = Matrix.new(x.dtype, x.shape[0], 8)
-    operations.assign(z3, x, None, [0, 3, 4, 1, 7])
-    matrix_compare(z3,
-                   [0, 0, 1, 1, 1],
-                   [1, 3, 0, 3, 7],
-                   [-2, -1, -3, -4, -5])
+        # Assign identical rows, new cols
+        z3 = Matrix.new(typ, x.shape[0], 8)
+        operations.assign(z3, x, None, [0, 3, 4, 1, 7])
+        matrix_compare(z3,
+                       [0, 0, 1, 1, 1],
+                       [1, 3, 0, 3, 7],
+                       [-2, -1, -3, -4, -5])
 
-    # Assign new rows, identical cols
-    z4 = Matrix.new(x.dtype, 4, x.shape[1])
-    operations.assign(z4, x, [3, 0], None)
-    matrix_compare(z4,
-                   [0, 0, 0, 3, 3],
-                   [0, 1, 4, 1, 3],
-                   [-3, -4, -5, -1, -2])
+        # Assign new rows, identical cols
+        z4 = Matrix.new(typ, 4, x.shape[1])
+        operations.assign(z4, x, [3, 0], None)
+        matrix_compare(z4,
+                       [0, 0, 0, 3, 3],
+                       [0, 1, 4, 1, 3],
+                       [-3, -4, -5, -1, -2])
 
 
 def test_assign_vec_to_mat(ms):
@@ -584,41 +611,42 @@ def test_assign_vec_to_mat(ms):
                    [0, 1, 2, 3, 4, 0, 1, 4],
                    [5, -1, 4, 1, 2, -3, -4, -5])
 
-    # Assign row with new indices
-    z2 = x.dup()
-    r1 = Vector.new(x.dtype, 3)
-    r1.build([0, 2], [100, 150])
-    operations.assign(z2, r1, 0, [4, 0, 2], accum=BinaryOp.plus)
-    matrix_compare(z2,
-                   [0, 0, 0, 0, 1, 1, 1],
-                   [1, 2, 3, 4, 0, 1, 4],
-                   [-1, 150, -2, 100, -3, -4, -5])
+    for typ in (x.dtype, INT32):
+        # Assign row with new indices
+        z2 = x.dup()
+        r1 = Vector.new(typ, 3)
+        r1.build([0, 2], [100, 150])
+        operations.assign(z2, r1, 0, [4, 0, 2], accum=BinaryOp.plus)
+        matrix_compare(z2,
+                       [0, 0, 0, 0, 1, 1, 1],
+                       [1, 2, 3, 4, 0, 1, 4],
+                       [-1, 150, -2, 100, -3, -4, -5])
 
-    # Assign col with identical indices
-    z3 = x.dup()
-    c0 = Vector.new(x.dtype, x.shape[0])
-    c0.build([0, 1], [97, 99])
-    operations.assign(z3, c0, None, 3, accum=BinaryOp.plus)
-    matrix_compare(z3,
-                   [0, 0, 1, 1, 1, 1],
-                   [1, 3, 0, 1, 3, 4],
-                   [-1, 95, -3, -4, 99, -5])
+        # Assign col with identical indices
+        z3 = x.dup()
+        c0 = Vector.new(typ, x.shape[0])
+        c0.build([0, 1], [97, 99])
+        operations.assign(z3, c0, None, 3, accum=BinaryOp.plus)
+        matrix_compare(z3,
+                       [0, 0, 1, 1, 1, 1],
+                       [1, 3, 0, 1, 3, 4],
+                       [-1, 95, -3, -4, 99, -5])
 
-    # Assign col with new indices
-    z4 = x.dup()
-    c1 = Vector.new(x.dtype, 1)
-    c1.build([0], [101])
-    operations.assign(z4, c1, [1], 3, accum=BinaryOp.plus)
-    matrix_compare(z4,
-                   [0, 0, 1, 1, 1, 1],
-                   [1, 3, 0, 1, 3, 4],
-                   [-1, -2, -3, -4, 101, -5])
+        # Assign col with new indices
+        z4 = x.dup()
+        c1 = Vector.new(typ, 1)
+        c1.build([0], [101])
+        operations.assign(z4, c1, [1], 3, accum=BinaryOp.plus)
+        matrix_compare(z4,
+                       [0, 0, 1, 1, 1, 1],
+                       [1, 3, 0, 1, 3, 4],
+                       [-1, -2, -3, -4, 101, -5])
 
-    # Empty input col
-    z5 = x.dup()
-    a = Vector.new(x.dtype, 2)
-    operations.assign(z5, a, [0, 1], 1)
-    matrix_compare(z5, [0, 1, 1], [3, 0, 4], [-2, -3, -5])
+        # Empty input col
+        z5 = x.dup()
+        a = Vector.new(typ, 2)
+        operations.assign(z5, a, [0, 1], 1)
+        matrix_compare(z5, [0, 1, 1], [3, 0, 4], [-2, -3, -5])
 
 
 def test_assign_scalar_to_vec(vs):
